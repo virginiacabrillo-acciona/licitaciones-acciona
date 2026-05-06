@@ -199,7 +199,7 @@ FAMILIAS_DEFAULT = [
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🏗️ LICITACIONES")
-    st.markdown("**Acciona Construcción**")
+    st.markdown("**Acciona**")
     st.markdown("<hr>", unsafe_allow_html=True)
 
     paso = st.radio("Paso actual", PASOS, index=PASOS.index(st.session_state.paso_activo))
@@ -254,7 +254,7 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
     <h1>⚙️ Sistema de Análisis de Licitaciones</h1>
-    <p>Guía paso a paso para el estudio comparativo de costes · Acciona Construcción</p>
+    <p>Guía paso a paso para el estudio comparativo de costes · Acciona</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -334,19 +334,34 @@ if paso == "1. Proyecto":
 elif paso == "2. Presupuesto":
     st.markdown("""
     <div class="step-header">
-        <h2>Paso 2 · Cargar y categorizar el presupuesto</h2>
-        <p>Sube el Excel del proyecto. La IA asignará una familia a cada partida automáticamente.</p>
+        <h2>Paso 2 · Cargar y seleccionar partidas</h2>
+        <p>Sube el Excel del proyecto. La herramienta identifica las partidas más relevantes automáticamente.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="info-box">
-    <strong>¿Cómo debe estar el Excel?</strong><br>
-    Necesita al menos una columna con la <strong>descripción</strong> de cada partida y otra con el <strong>importe total</strong>.
-    Los nombres de columna pueden ser cualquiera — tú los seleccionas en el siguiente paso.<br><br>
-    Si viene de Presto, expórtalo como Excel (.xlsx).
-    </div>
-    """, unsafe_allow_html=True)
+    def parsear_numero_eu(valor):
+        """Convierte número en formato europeo (1.234,56) a float."""
+        try:
+            if isinstance(valor, (int, float)):
+                return float(valor)
+            s = str(valor).strip().replace(" ", "").replace("€", "")
+            # Formato europeo: punto como miles, coma como decimal
+            if "," in s and "." in s:
+                s = s.replace(".", "").replace(",", ".")
+            elif "," in s:
+                s = s.replace(",", ".")
+            return float(s)
+        except:
+            return None
+
+    def col_letra(i):
+        """Devuelve letra de columna estilo Excel: A, B, ..., Z, AA, AB..."""
+        result = ""
+        n = i + 1
+        while n > 0:
+            n, r = divmod(n - 1, 26)
+            result = chr(65 + r) + result
+        return result
 
     archivo = st.file_uploader("📂 Subir Excel del presupuesto", type=["xlsx", "xls", "csv"])
 
@@ -355,173 +370,204 @@ elif paso == "2. Presupuesto":
             if archivo.name.endswith(".csv"):
                 df_raw = pd.read_csv(archivo)
             else:
-                # Intentar leer desde la primera hoja, saltando filas vacías al inicio
                 df_raw = pd.read_excel(archivo, header=None)
-                # Detectar la fila de cabeceras: primera fila con al menos 3 celdas no nulas
+                # Detectar fila de cabeceras
                 header_row = 0
                 for i, row in df_raw.iterrows():
-                    non_null = row.dropna()
-                    if len(non_null) >= 3:
+                    if len(row.dropna()) >= 3:
                         header_row = i
                         break
                 df_raw = pd.read_excel(archivo, header=header_row)
-                # Eliminar columnas completamente vacías
-                df_raw = df_raw.dropna(axis=1, how="all")
-                # Eliminar filas completamente vacías
-                df_raw = df_raw.dropna(axis=0, how="all")
-                df_raw = df_raw.reset_index(drop=True)
+                df_raw = df_raw.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
+
+            # Construir etiquetas columna: "A · Código", "B · Descripción", etc.
+            etiquetas = {col: f"{col_letra(i)} · {col}" for i, col in enumerate(df_raw.columns)}
+            etiquetas_lista = ["— no incluida —"] + [etiquetas[c] for c in df_raw.columns]
+            etiqueta_a_col = {v: k for k, v in etiquetas.items()}
 
             st.success(f"✓ Archivo leído: {len(df_raw)} filas · {len(df_raw.columns)} columnas")
 
-            st.markdown("**Vista previa del archivo (primeras 8 filas)**")
-            st.dataframe(df_raw.head(8), use_container_width=True)
+            st.markdown("**Vista previa (primeras 6 filas)**")
+            df_preview = df_raw.head(6).copy()
+            df_preview.columns = [f"{col_letra(i)} · {c}" for i, c in enumerate(df_raw.columns)]
+            st.dataframe(df_preview, use_container_width=True)
 
             st.markdown("---")
-            st.markdown("**Selecciona qué columna contiene cada dato**")
-            st.caption("Mira la vista previa de arriba e identifica el nombre de cada columna.")
+            st.markdown("**Indica qué columna contiene cada dato**")
+            st.caption("Las letras (A, B, C...) corresponden a las columnas del Excel tal como están en la vista previa.")
 
-            cols_disponibles = ["— no incluida —"] + [str(c) for c in df_raw.columns]
-            c1, c2, c3, c4 = st.columns(4)
-            col_cod = c1.selectbox("Código / referencia", cols_disponibles, key="col_cod")
-            col_desc = c2.selectbox("Descripción ✱", cols_disponibles, key="col_desc")
-            col_med = c3.selectbox("Medición / cantidad", cols_disponibles, key="col_med")
-            col_imp = c4.selectbox("Importe total ✱", cols_disponibles, key="col_imp")
+            c1, c2, c3 = st.columns(3)
+            sel_desc = c1.selectbox("Descripción ✱", etiquetas_lista, key="sel_desc")
+            sel_imp  = c2.selectbox("Importe total ✱", etiquetas_lista, key="sel_imp")
+            sel_pu   = c3.selectbox("Precio unitario", etiquetas_lista, key="sel_pu")
 
-            col_uni = st.selectbox("Unidad (opcional)", cols_disponibles, key="col_uni")
+            c4, c5 = st.columns(2)
+            sel_med  = c4.selectbox("Medición / cantidad", etiquetas_lista, key="sel_med")
+            sel_uni  = c5.selectbox("Unidad", etiquetas_lista, key="sel_uni")
+            sel_cod  = st.selectbox("Código / referencia (opcional)", etiquetas_lista, key="sel_cod")
 
-            if st.button("✅ Confirmar y cargar partidas"):
-                if col_desc == "— no incluida —" or col_imp == "— no incluida —":
-                    st.error("⚠️ Las columnas Descripción e Importe total son obligatorias.")
+            if st.button("✅ Cargar partidas"):
+                if sel_desc == "— no incluida —" or sel_imp == "— no incluida —":
+                    st.error("⚠️ Descripción e Importe total son obligatorios.")
                 else:
-                    columnas_map = {}
-                    if col_cod != "— no incluida —": columnas_map[col_cod] = "Código"
-                    columnas_map[col_desc] = "Descripción"
-                    if col_uni != "— no incluida —": columnas_map[col_uni] = "Unidad"
-                    if col_med != "— no incluida —": columnas_map[col_med] = "Medición"
-                    columnas_map[col_imp] = "Importe total"
+                    col_desc_real = etiqueta_a_col[sel_desc]
+                    col_imp_real  = etiqueta_a_col[sel_imp]
 
-                    partidas = df_raw[list(columnas_map.keys())].copy()
-                    partidas = partidas.rename(columns=columnas_map)
-                    partidas["Importe total"] = pd.to_numeric(partidas["Importe total"], errors="coerce")
+                    cols_sel = {col_desc_real: "Descripción", col_imp_real: "Importe total"}
+                    if sel_pu  != "— no incluida —": cols_sel[etiqueta_a_col[sel_pu]]  = "Precio unitario"
+                    if sel_med != "— no incluida —": cols_sel[etiqueta_a_col[sel_med]] = "Medición"
+                    if sel_uni != "— no incluida —": cols_sel[etiqueta_a_col[sel_uni]] = "Unidad"
+                    if sel_cod != "— no incluida —": cols_sel[etiqueta_a_col[sel_cod]] = "Código"
+
+                    partidas = df_raw[list(cols_sel.keys())].rename(columns=cols_sel).copy()
+                    partidas["Importe total"] = partidas["Importe total"].apply(parsear_numero_eu)
+                    if "Precio unitario" in partidas.columns:
+                        partidas["Precio unitario"] = partidas["Precio unitario"].apply(parsear_numero_eu)
+                    if "Medición" in partidas.columns:
+                        partidas["Medición"] = partidas["Medición"].apply(parsear_numero_eu)
+
                     partidas = partidas.dropna(subset=["Importe total"])
                     partidas = partidas[partidas["Importe total"] > 0].reset_index(drop=True)
                     partidas["Familia"] = "Sin asignar"
+                    partidas["Analizar"] = False
+
+                    # Pre-seleccionar partidas hasta el 80% del importe acumulado
+                    partidas_sorted = partidas.sort_values("Importe total", ascending=False).copy()
+                    total_imp = partidas_sorted["Importe total"].sum()
+                    acum = 0
+                    indices_top = []
+                    for idx in partidas_sorted.index:
+                        acum += partidas_sorted.at[idx, "Importe total"]
+                        indices_top.append(idx)
+                        if acum / total_imp >= 0.80:
+                            break
+                    partidas.loc[indices_top, "Analizar"] = True
 
                     st.session_state.partidas = partidas
-                    st.success(f"✓ {len(partidas)} partidas cargadas con importe > 0. Ahora puedes categorizarlas con IA.")
+                    st.success(f"✓ {len(partidas)} partidas cargadas. {sum(partidas['Analizar'])} pre-seleccionadas (≥80% del importe).")
                     st.rerun()
 
         except Exception as e:
             st.error(f"Error al leer el archivo: {e}")
-            st.caption("Si el archivo tiene un formato especial (varias cabeceras, celdas fusionadas), contacta para ajustar la lectura.")
 
-    # ── Categorización con IA ──────────────────────────────────────────────────
+    # ── Selección y categorización ─────────────────────────────────────────────
     if not st.session_state.partidas.empty:
-        st.markdown("---")
-
         df_part = st.session_state.partidas.copy()
         total_imp = pd.to_numeric(df_part["Importe total"], errors="coerce").sum()
-        n_sin_asignar = (df_part["Familia"] == "Sin asignar").sum()
+        n_sel = df_part["Analizar"].sum() if "Analizar" in df_part.columns else 0
+        imp_sel = df_part[df_part.get("Analizar", False) == True]["Importe total"].sum() if "Analizar" in df_part.columns else 0
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Partidas cargadas", len(df_part))
-        col2.metric("Importe total", f"{total_imp:,.0f} €")
-        col3.metric("Sin categorizar", n_sin_asignar)
+        st.markdown("---")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total partidas", len(df_part))
+        c2.metric("Seleccionadas para análisis", int(n_sel))
+        c3.metric("% importe cubierto", f"{imp_sel/total_imp*100:.1f}%" if total_imp else "—")
 
-        st.markdown("**Categorización automática con IA**")
-        st.caption("La IA lee la descripción de cada partida y propone una familia. Tú revisas y corriges lo que necesites.")
+        st.markdown("**Selecciona qué partidas analizar y categoriza con IA**")
+        st.caption("Marca ✅ en la columna 'Analizar' las partidas que quieres incluir. Las más importantes ya están marcadas.")
 
-        if st.button("🤖 Categorizar con IA"):
-            familias_str = ", ".join(FAMILIAS_DEFAULT)
-            descripciones = df_part["Descripción"].fillna("").tolist()
-
-            # Enviamos en bloque para no saturar
-            prompt = f"""Eres un experto en presupuestos de construcción de infraestructuras hidráulicas (depuradoras, desaladoras, conducciones, etc.).
-
-Debes asignar cada una de las siguientes partidas de presupuesto a UNA de estas familias:
-{familias_str}
-
-Responde ÚNICAMENTE con un JSON: una lista de objetos con "indice" (número de fila, empezando en 0) y "familia" (exactamente una de las familias anteriores).
-No añadas explicaciones ni texto fuera del JSON.
-
-Partidas:
-""" + "\n".join([f"{i}: {d}" for i, d in enumerate(descripciones[:100])])
-
-            try:
-                with st.spinner("Analizando partidas con IA..."):
-                    resp = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type": "application/json"},
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 4000,
-                            "messages": [{"role": "user", "content": prompt}]
-                        }
-                    )
-                    resultado = resp.json()
-                    texto = resultado["content"][0]["text"]
-
-                    # Limpiar posibles bloques de código
-                    texto = texto.strip()
-                    if texto.startswith("```"):
-                        texto = texto.split("```")[1]
-                        if texto.startswith("json"):
-                            texto = texto[4:]
-                    texto = texto.strip()
-
-                    asignaciones = json.loads(texto)
-                    for item in asignaciones:
-                        idx = item["indice"]
-                        fam = item["familia"]
-                        if 0 <= idx < len(df_part):
-                            df_part.at[idx, "Familia"] = fam
-
-                    st.session_state.partidas = df_part
-                    st.success(f"✓ IA ha categorizado {len(asignaciones)} partidas. Revisa y corrige si es necesario.")
-                    st.rerun()
-
-            except Exception as e:
-                st.error(f"Error en la categorización: {e}")
-                st.caption("Puedes asignar las familias manualmente en la tabla de abajo.")
-
-        # ── Tabla editable ───────────────────────────────────────────────────
-        st.markdown("**Revisa y ajusta la categorización**")
-        familias_opciones = FAMILIAS_DEFAULT
+        col_config = {
+            "Analizar": st.column_config.CheckboxColumn("Analizar ✅", default=False),
+            "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT, required=False),
+            "Importe total": st.column_config.NumberColumn("Importe total (€)", format="%.2f"),
+        }
+        if "Precio unitario" in df_part.columns:
+            col_config["Precio unitario"] = st.column_config.NumberColumn("P. Unitario (€)", format="%.2f")
 
         edited = st.data_editor(
-            st.session_state.partidas,
-            column_config={
-                "Familia": st.column_config.SelectboxColumn(
-                    "Familia",
-                    options=familias_opciones,
-                    required=True,
-                ),
-                "Importe total": st.column_config.NumberColumn(
-                    "Importe total (€)",
-                    format="%.2f",
-                )
-            },
+            df_part,
+            column_config=col_config,
             use_container_width=True,
             num_rows="fixed",
-            height=400,
+            height=420,
         )
         st.session_state.partidas = edited
 
-        if st.button("💾 Guardar categorización"):
-            st.success("✓ Categorización guardada")
+        col_a, col_b = st.columns(2)
+        if col_a.button("🤖 Categorizar seleccionadas con IA"):
+            api_key = st.secrets.get("GEMINI_API_KEY", "")
+            if not api_key:
+                st.error("⚠️ Falta la API key de Anthropic en los Secrets de Streamlit. Ver instrucciones abajo.")
+            else:
+                seleccionadas = edited[edited["Analizar"] == True].copy()
+                if seleccionadas.empty:
+                    st.warning("No hay partidas seleccionadas.")
+                else:
+                    familias_str = ", ".join(FAMILIAS_DEFAULT)
+                    descripciones = seleccionadas["Descripción"].fillna("").tolist()
+                    indices_orig = seleccionadas.index.tolist()
 
-        # ── Resumen por familia ──────────────────────────────────────────────
+                    prompt = f"""Eres un experto en presupuestos de infraestructuras civiles e hidráulicas (depuradoras, desaladoras, conducciones, obras marítimas).
+
+Asigna cada partida a UNA de estas familias exactamente como están escritas:
+{familias_str}
+
+Responde ÚNICAMENTE con JSON, sin texto adicional ni bloques de código:
+[{{"indice": 0, "familia": "nombre exacto"}}, ...]
+
+Partidas (índice: descripción):
+""" + "\n".join([f"{i}: {d}" for i, d in enumerate(descripciones)])
+
+                    try:
+                        with st.spinner("Categorizando con IA..."):
+                            resp = requests.post(
+                                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
+                                headers={"Content-Type": "application/json"},
+                                json={
+                                    "contents": [{"parts": [{"text": prompt}]}],
+                                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4000}
+                                }
+                            )
+                            data = resp.json()
+                            if "error" in data:
+                                st.error(f"Error API: {data['error']['message']}")
+                            else:
+                                texto = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                                if texto.startswith("```"):
+                                    texto = texto.split("```")[1]
+                                    if texto.startswith("json"):
+                                        texto = texto[4:]
+                                asignaciones = json.loads(texto.strip())
+                                df_result = st.session_state.partidas.copy()
+                                for item in asignaciones:
+                                    idx_local = item["indice"]
+                                    if idx_local < len(indices_orig):
+                                        idx_real = indices_orig[idx_local]
+                                        df_result.at[idx_real, "Familia"] = item["familia"]
+                                st.session_state.partidas = df_result
+                                st.success(f"✓ {len(asignaciones)} partidas categorizadas. Revisa y ajusta si es necesario.")
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"Error inesperado: {e}")
+
+        if col_b.button("💾 Guardar selección y familias"):
+            st.success("✓ Guardado")
+
+        # Resumen por familia (solo seleccionadas)
+        df_sel = st.session_state.partidas[st.session_state.partidas.get("Analizar", False) == True].copy() if "Analizar" in st.session_state.partidas.columns else pd.DataFrame()
+        if not df_sel.empty and "Familia" in df_sel.columns:
+            st.markdown("---")
+            st.markdown("**Resumen por familia (partidas seleccionadas)**")
+            df_sel["Importe total"] = pd.to_numeric(df_sel["Importe total"], errors="coerce")
+            resumen_fam = df_sel.groupby("Familia")["Importe total"].sum().reset_index()
+            resumen_fam.columns = ["Familia", "Importe (€)"]
+            resumen_fam = resumen_fam.sort_values("Importe (€)", ascending=False)
+            total_r = resumen_fam["Importe (€)"].sum()
+            resumen_fam["% s/ total"] = (resumen_fam["Importe (€)"] / total_r * 100).round(1).astype(str) + "%"
+            resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
+            st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
+
         st.markdown("---")
-        st.markdown("**Resumen por familia**")
-        resumen = edited.copy()
-        resumen["Importe total"] = pd.to_numeric(resumen["Importe total"], errors="coerce")
-        resumen_fam = resumen.groupby("Familia")["Importe total"].sum().reset_index()
-        resumen_fam.columns = ["Familia", "Importe (€)"]
-        resumen_fam = resumen_fam.sort_values("Importe (€)", ascending=False)
-        total_res = resumen_fam["Importe (€)"].sum()
-        resumen_fam["% s/ total"] = (resumen_fam["Importe (€)"] / total_res * 100).round(1).astype(str) + "%"
-        resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
-        st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
+        st.markdown("""
+        <div class="info-box">
+        <strong>⚙️ Configurar la API key de Anthropic (necesario para la IA)</strong><br><br>
+        1. Ve a <strong>share.streamlit.io</strong> → tu app → <strong>Settings → Secrets</strong><br>
+        2. Añade esto:<br>
+        <code>GEMINI_API_KEY = "AIza..."</code><br>
+        3. Guarda y la app se reiniciará automáticamente.<br><br>
+        Si no tienes API key, créala en <strong>aistudio.google.com</strong>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -878,4 +924,5 @@ elif paso == "6. Exportar":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.success("✓ Excel generado. Haz clic arriba para descargarlo.")
+
 
