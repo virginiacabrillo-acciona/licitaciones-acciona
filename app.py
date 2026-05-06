@@ -428,11 +428,32 @@ elif paso == "2. Presupuesto":
 
                     partidas = partidas.dropna(subset=["Importe total"])
                     partidas = partidas[partidas["Importe total"] > 0].reset_index(drop=True)
-                    partidas["Familia"] = "Sin asignar"
-                    partidas["Analizar"] = False
+
+                    # ── Filtrar filas de resumen / capítulo ──────────────────
+                    n_antes = len(partidas)
+                    PALABRAS_RESUMEN = [
+                        "capítulo", "capitulo", "cap.", "cap ", "total", "resumen",
+                        "suma", "subtotal", "sub-total", "apartado", "título", "titulo"
+                    ]
+                    def es_resumen(row):
+                        desc = str(row.get("Descripción", "")).strip().lower()
+                        # Si empieza por palabra de resumen → probable capítulo
+                        if any(desc.startswith(p) for p in PALABRAS_RESUMEN):
+                            return True
+                        # Si tiene precio unitario mapeado y es nulo o cero → resumen
+                        if "Precio unitario" in row and (pd.isna(row["Precio unitario"]) or row["Precio unitario"] == 0):
+                            return True
+                        return False
+
+                    mask_resumen = partidas.apply(es_resumen, axis=1)
+                    partidas_filtradas = partidas[~mask_resumen].reset_index(drop=True)
+                    n_filtradas = n_antes - len(partidas_filtradas)
+
+                    partidas_filtradas["Familia"] = "Sin asignar"
+                    partidas_filtradas["Analizar"] = False
 
                     # Pre-seleccionar partidas hasta el 80% del importe acumulado
-                    partidas_sorted = partidas.sort_values("Importe total", ascending=False).copy()
+                    partidas_sorted = partidas_filtradas.sort_values("Importe total", ascending=False).copy()
                     total_imp = partidas_sorted["Importe total"].sum()
                     acum = 0
                     indices_top = []
@@ -441,10 +462,17 @@ elif paso == "2. Presupuesto":
                         indices_top.append(idx)
                         if acum / total_imp >= 0.80:
                             break
-                    partidas.loc[indices_top, "Analizar"] = True
+                    partidas_filtradas.loc[indices_top, "Analizar"] = True
 
-                    st.session_state.partidas = partidas
-                    st.success(f"✓ {len(partidas)} partidas cargadas. {sum(partidas['Analizar'])} pre-seleccionadas (≥80% del importe).")
+                    # Guardar también las filas de resumen por separado por si acaso
+                    st.session_state.partidas = partidas_filtradas
+                    st.session_state.partidas_resumen = partidas[mask_resumen].reset_index(drop=True)
+
+                    msg = f"✓ {len(partidas_filtradas)} partidas unitarias cargadas"
+                    if n_filtradas > 0:
+                        msg += f" · {n_filtradas} filas de capítulo/resumen descartadas"
+                    msg += f" · {sum(partidas_filtradas['Analizar'])} pre-seleccionadas (≥80% del importe)"
+                    st.success(msg)
                     st.rerun()
 
         except Exception as e:
@@ -557,17 +585,17 @@ Partidas (índice: descripción):
             resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
             st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
 
-        st.markdown("---")
-        st.markdown("""
-        <div class="info-box">
-        <strong>⚙️ Configurar la API key de Anthropic (necesario para la IA)</strong><br><br>
-        1. Ve a <strong>share.streamlit.io</strong> → tu app → <strong>Settings → Secrets</strong><br>
-        2. Añade esto:<br>
-        <code>GEMINI_API_KEY = "AIza..."</code><br>
-        3. Guarda y la app se reiniciará automáticamente.<br><br>
-        Si no tienes API key, créala en <strong>aistudio.google.com</strong>
-        </div>
-        """, unsafe_allow_html=True)
+        if not st.secrets.get("GEMINI_API_KEY", ""):
+            st.markdown("---")
+            st.markdown("""
+            <div class="info-box">
+            <strong>⚙️ Configura la API key de Gemini para activar la IA</strong><br><br>
+            1. Ve a <strong>share.streamlit.io</strong> → tu app → <strong>Settings → Secrets</strong><br>
+            2. Añade: <code>GEMINI_API_KEY = "AIza..."</code><br>
+            3. Guarda — la app se reinicia sola.<br><br>
+            Obtén tu clave gratuita en <strong>aistudio.google.com</strong>
+            </div>
+            """, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -924,5 +952,6 @@ elif paso == "6. Exportar":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.success("✓ Excel generado. Haz clic arriba para descargarlo.")
+
 
 
