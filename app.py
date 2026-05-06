@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import io
+import requests
 from datetime import date
 
 # ─── Configuración de página ───────────────────────────────────────────────────
@@ -281,7 +282,11 @@ if paso == "1. Proyecto":
     with col2:
         fecha_limite = st.date_input("Fecha límite de presentación",
                                       value=date.fromisoformat(p["fecha_limite"]) if p.get("fecha_limite") else date.today())
-        presupuesto = st.number_input("Presupuesto de licitación (€)", value=float(p.get("presupuesto", 0)), step=100000.0, format="%.0f")
+        presupuesto_texto = st.text_input(
+            "Presupuesto de licitación (€)",
+            value=p.get("presupuesto_texto", ""),
+            placeholder="37.166.355,32"
+        )
         expediente = st.text_input("Nº expediente / referencia interna", value=p.get("expediente", ""))
         responsable = st.text_input("Técnico responsable del análisis", value=p.get("responsable", ""))
 
@@ -289,14 +294,23 @@ if paso == "1. Proyecto":
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
+    def parsear_importe(texto):
+        try:
+            limpio = texto.strip().replace("€", "").replace(" ", "").replace(".", "").replace(",", ".")
+            return float(limpio)
+        except:
+            return 0.0
+
     if st.button("💾 Guardar datos del proyecto"):
+        presupuesto_valor = parsear_importe(presupuesto_texto)
         st.session_state.proyecto = {
             "nombre": nombre,
             "tipologia": tipologia,
             "pais": pais,
             "promotor": promotor,
             "fecha_limite": str(fecha_limite),
-            "presupuesto": presupuesto,
+            "presupuesto": presupuesto_valor,
+            "presupuesto_texto": presupuesto_texto,
             "expediente": expediente,
             "responsable": responsable,
             "notas": notas,
@@ -308,7 +322,8 @@ if paso == "1. Proyecto":
         p = st.session_state.proyecto
         st.markdown("<br>", unsafe_allow_html=True)
         col1, col2, col3 = st.columns(3)
-        col1.metric("Presupuesto", f"{p.get('presupuesto', 0):,.0f} €")
+        pres = p.get("presupuesto", 0)
+        col1.metric("Presupuesto", f"{pres:,.2f} €" if pres else "—")
         col2.metric("Tipología", p.get("tipologia", "—"))
         col3.metric("Fecha límite", p.get("fecha_limite", "—"))
 
@@ -320,16 +335,16 @@ elif paso == "2. Presupuesto":
     st.markdown("""
     <div class="step-header">
         <h2>Paso 2 · Cargar y categorizar el presupuesto</h2>
-        <p>Sube el Excel del proyecto y asigna cada partida a una familia de análisis</p>
+        <p>Sube el Excel del proyecto. La IA asignará una familia a cada partida automáticamente.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("**¿Cómo debe estar el Excel?**")
     st.markdown("""
     <div class="info-box">
-    El archivo debe tener al menos estas columnas:<br>
-    <strong>Código</strong> · <strong>Descripción</strong> · <strong>Unidad</strong> · <strong>Medición</strong> · <strong>Precio unitario</strong> · <strong>Importe total</strong>
-    <br><br>Si viene de Presto, expórtalo como Excel (.xlsx) y revisa que los nombres de columna son reconocibles.
+    <strong>¿Cómo debe estar el Excel?</strong><br>
+    Necesita al menos una columna con la <strong>descripción</strong> de cada partida y otra con el <strong>importe total</strong>.
+    Los nombres de columna pueden ser cualquiera — tú los seleccionas en el siguiente paso.<br><br>
+    Si viene de Presto, expórtalo como Excel (.xlsx).
     </div>
     """, unsafe_allow_html=True)
 
@@ -338,76 +353,175 @@ elif paso == "2. Presupuesto":
     if archivo:
         try:
             if archivo.name.endswith(".csv"):
-                df = pd.read_csv(archivo)
+                df_raw = pd.read_csv(archivo)
             else:
-                df = pd.read_excel(archivo)
+                # Intentar leer desde la primera hoja, saltando filas vacías al inicio
+                df_raw = pd.read_excel(archivo, header=None)
+                # Detectar la fila de cabeceras: primera fila con al menos 3 celdas no nulas
+                header_row = 0
+                for i, row in df_raw.iterrows():
+                    non_null = row.dropna()
+                    if len(non_null) >= 3:
+                        header_row = i
+                        break
+                df_raw = pd.read_excel(archivo, header=header_row)
+                # Eliminar columnas completamente vacías
+                df_raw = df_raw.dropna(axis=1, how="all")
+                # Eliminar filas completamente vacías
+                df_raw = df_raw.dropna(axis=0, how="all")
+                df_raw = df_raw.reset_index(drop=True)
 
-            st.success(f"✓ Archivo cargado: {len(df)} filas detectadas")
-            st.dataframe(df.head(10), use_container_width=True)
+            st.success(f"✓ Archivo leído: {len(df_raw)} filas · {len(df_raw.columns)} columnas")
 
-            st.markdown("**Mapeo de columnas**")
-            cols = ["— seleccionar —"] + list(df.columns)
-            c1, c2, c3 = st.columns(3)
-            col_desc = c1.selectbox("Columna Descripción", cols)
-            col_med = c2.selectbox("Columna Medición", cols)
-            col_imp = c3.selectbox("Columna Importe total", cols)
+            st.markdown("**Vista previa del archivo (primeras 8 filas)**")
+            st.dataframe(df_raw.head(8), use_container_width=True)
 
-            if st.button("✅ Confirmar columnas y categorizar"):
-                if col_desc == "— seleccionar —" or col_imp == "— seleccionar —":
-                    st.error("Selecciona al menos la columna de Descripción e Importe total.")
+            st.markdown("---")
+            st.markdown("**Selecciona qué columna contiene cada dato**")
+            st.caption("Mira la vista previa de arriba e identifica el nombre de cada columna.")
+
+            cols_disponibles = ["— no incluida —"] + [str(c) for c in df_raw.columns]
+            c1, c2, c3, c4 = st.columns(4)
+            col_cod = c1.selectbox("Código / referencia", cols_disponibles, key="col_cod")
+            col_desc = c2.selectbox("Descripción ✱", cols_disponibles, key="col_desc")
+            col_med = c3.selectbox("Medición / cantidad", cols_disponibles, key="col_med")
+            col_imp = c4.selectbox("Importe total ✱", cols_disponibles, key="col_imp")
+
+            col_uni = st.selectbox("Unidad (opcional)", cols_disponibles, key="col_uni")
+
+            if st.button("✅ Confirmar y cargar partidas"):
+                if col_desc == "— no incluida —" or col_imp == "— no incluida —":
+                    st.error("⚠️ Las columnas Descripción e Importe total son obligatorias.")
                 else:
-                    partidas = df[[c for c in [col_desc, col_med, col_imp] if c != "— seleccionar —"]].copy()
-                    partidas.columns = ["Descripción", "Medición", "Importe total"][:len(partidas.columns)]
+                    columnas_map = {}
+                    if col_cod != "— no incluida —": columnas_map[col_cod] = "Código"
+                    columnas_map[col_desc] = "Descripción"
+                    if col_uni != "— no incluida —": columnas_map[col_uni] = "Unidad"
+                    if col_med != "— no incluida —": columnas_map[col_med] = "Medición"
+                    columnas_map[col_imp] = "Importe total"
+
+                    partidas = df_raw[list(columnas_map.keys())].copy()
+                    partidas = partidas.rename(columns=columnas_map)
+                    partidas["Importe total"] = pd.to_numeric(partidas["Importe total"], errors="coerce")
+                    partidas = partidas.dropna(subset=["Importe total"])
+                    partidas = partidas[partidas["Importe total"] > 0].reset_index(drop=True)
                     partidas["Familia"] = "Sin asignar"
+
                     st.session_state.partidas = partidas
-                    st.success("✓ Partidas cargadas. Asigna familias abajo.")
+                    st.success(f"✓ {len(partidas)} partidas cargadas con importe > 0. Ahora puedes categorizarlas con IA.")
+                    st.rerun()
 
         except Exception as e:
             st.error(f"Error al leer el archivo: {e}")
+            st.caption("Si el archivo tiene un formato especial (varias cabeceras, celdas fusionadas), contacta para ajustar la lectura.")
 
-    # Asignación de familias
+    # ── Categorización con IA ──────────────────────────────────────────────────
     if not st.session_state.partidas.empty:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("**Asignación de familias por partida**")
+        st.markdown("---")
 
-        df_edit = st.session_state.partidas.copy()
+        df_part = st.session_state.partidas.copy()
+        total_imp = pd.to_numeric(df_part["Importe total"], errors="coerce").sum()
+        n_sin_asignar = (df_part["Familia"] == "Sin asignar").sum()
 
-        # Resumen por importe
-        if "Importe total" in df_edit.columns:
-            total = pd.to_numeric(df_edit["Importe total"], errors="coerce").sum()
-            st.metric("Importe total cargado", f"{total:,.0f} €")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Partidas cargadas", len(df_part))
+        col2.metric("Importe total", f"{total_imp:,.0f} €")
+        col3.metric("Sin categorizar", n_sin_asignar)
 
-        familias_opciones = FAMILIAS_DEFAULT + list(st.session_state.familias_config.keys())
+        st.markdown("**Categorización automática con IA**")
+        st.caption("La IA lee la descripción de cada partida y propone una familia. Tú revisas y corriges lo que necesites.")
+
+        if st.button("🤖 Categorizar con IA"):
+            familias_str = ", ".join(FAMILIAS_DEFAULT)
+            descripciones = df_part["Descripción"].fillna("").tolist()
+
+            # Enviamos en bloque para no saturar
+            prompt = f"""Eres un experto en presupuestos de construcción de infraestructuras hidráulicas (depuradoras, desaladoras, conducciones, etc.).
+
+Debes asignar cada una de las siguientes partidas de presupuesto a UNA de estas familias:
+{familias_str}
+
+Responde ÚNICAMENTE con un JSON: una lista de objetos con "indice" (número de fila, empezando en 0) y "familia" (exactamente una de las familias anteriores).
+No añadas explicaciones ni texto fuera del JSON.
+
+Partidas:
+""" + "\n".join([f"{i}: {d}" for i, d in enumerate(descripciones[:100])])
+
+            try:
+                with st.spinner("Analizando partidas con IA..."):
+                    resp = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 4000,
+                            "messages": [{"role": "user", "content": prompt}]
+                        }
+                    )
+                    resultado = resp.json()
+                    texto = resultado["content"][0]["text"]
+
+                    # Limpiar posibles bloques de código
+                    texto = texto.strip()
+                    if texto.startswith("```"):
+                        texto = texto.split("```")[1]
+                        if texto.startswith("json"):
+                            texto = texto[4:]
+                    texto = texto.strip()
+
+                    asignaciones = json.loads(texto)
+                    for item in asignaciones:
+                        idx = item["indice"]
+                        fam = item["familia"]
+                        if 0 <= idx < len(df_part):
+                            df_part.at[idx, "Familia"] = fam
+
+                    st.session_state.partidas = df_part
+                    st.success(f"✓ IA ha categorizado {len(asignaciones)} partidas. Revisa y corrige si es necesario.")
+                    st.rerun()
+
+            except Exception as e:
+                st.error(f"Error en la categorización: {e}")
+                st.caption("Puedes asignar las familias manualmente en la tabla de abajo.")
+
+        # ── Tabla editable ───────────────────────────────────────────────────
+        st.markdown("**Revisa y ajusta la categorización**")
+        familias_opciones = FAMILIAS_DEFAULT
 
         edited = st.data_editor(
-            df_edit,
+            st.session_state.partidas,
             column_config={
                 "Familia": st.column_config.SelectboxColumn(
                     "Familia",
                     options=familias_opciones,
                     required=True,
+                ),
+                "Importe total": st.column_config.NumberColumn(
+                    "Importe total (€)",
+                    format="%.2f",
                 )
             },
             use_container_width=True,
-            num_rows="dynamic",
+            num_rows="fixed",
+            height=400,
         )
         st.session_state.partidas = edited
 
-        if st.button("💾 Guardar asignación de familias"):
-            st.success("✓ Familias guardadas")
+        if st.button("💾 Guardar categorización"):
+            st.success("✓ Categorización guardada")
 
-        # Resumen por familia
-        if "Familia" in edited.columns and "Importe total" in edited.columns:
-            st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("**Resumen por familia**")
-            resumen = edited.copy()
-            resumen["Importe total"] = pd.to_numeric(resumen["Importe total"], errors="coerce")
-            resumen_fam = resumen.groupby("Familia")["Importe total"].sum().reset_index()
-            resumen_fam.columns = ["Familia", "Importe (€)"]
-            total_res = resumen_fam["Importe (€)"].sum()
-            resumen_fam["% sobre total"] = (resumen_fam["Importe (€)"] / total_res * 100).round(1).astype(str) + "%"
-            resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
-            st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
+        # ── Resumen por familia ──────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("**Resumen por familia**")
+        resumen = edited.copy()
+        resumen["Importe total"] = pd.to_numeric(resumen["Importe total"], errors="coerce")
+        resumen_fam = resumen.groupby("Familia")["Importe total"].sum().reset_index()
+        resumen_fam.columns = ["Familia", "Importe (€)"]
+        resumen_fam = resumen_fam.sort_values("Importe (€)", ascending=False)
+        total_res = resumen_fam["Importe (€)"].sum()
+        resumen_fam["% s/ total"] = (resumen_fam["Importe (€)"] / total_res * 100).round(1).astype(str) + "%"
+        resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
+        st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -764,3 +878,4 @@ elif paso == "6. Exportar":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.success("✓ Excel generado. Haz clic arriba para descargarlo.")
+
