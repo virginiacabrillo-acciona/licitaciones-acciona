@@ -184,17 +184,75 @@ PASOS = [
     "6. Exportar",
 ]
 
-FAMILIAS_DEFAULT = [
-    "Movimiento de tierras",
-    "Hormigón estructural",
-    "Tuberías y conducciones",
-    "Equipos electromecánicos",
-    "Obras de fábrica",
-    "Prefabricados",
-    "Instalaciones eléctricas",
-    "Mano de obra especializada",
-    "Otros",
+# ─── Taxonomía de familias ────────────────────────────────────────────────────
+TAXONOMIA = [
+    # CIVIL
+    {"codigo": "CIV-01", "familia": "CIV-01 · Preliminares, implantación y trabajos previos", "disciplina": "Civil"},
+    {"codigo": "CIV-02", "familia": "CIV-02 · Demoliciones, desmontajes y levantados", "disciplina": "Civil"},
+    {"codigo": "CIV-03", "familia": "CIV-03 · Movimiento de tierras", "disciplina": "Civil"},
+    {"codigo": "CIV-04", "familia": "CIV-04 · Contenciones, entibaciones y achiques", "disciplina": "Civil"},
+    {"codigo": "CIV-05", "familia": "CIV-05 · Tratamiento del terreno y cimentaciones especiales", "disciplina": "Civil"},
+    {"codigo": "CIV-06", "familia": "CIV-06 · Cimentaciones y estructuras de hormigón armado", "disciplina": "Civil"},
+    {"codigo": "CIV-07", "familia": "CIV-07 · Encofrados, ferralla y hormigones", "disciplina": "Civil"},
+    {"codigo": "CIV-08", "familia": "CIV-08 · Estructuras metálicas", "disciplina": "Civil"},
+    {"codigo": "CIV-09", "familia": "CIV-09 · Cerrajería, tramex, plataformas y vallados", "disciplina": "Civil"},
+    {"codigo": "CIV-10", "familia": "CIV-10 · Redes enterradas civiles y drenaje", "disciplina": "Civil"},
+    {"codigo": "CIV-11", "familia": "CIV-11 · Obra hidráulica civil", "disciplina": "Civil"},
+    {"codigo": "CIV-12", "familia": "CIV-12 · Obra marítima, captación y emisarios", "disciplina": "Civil"},
+    {"codigo": "CIV-13", "familia": "CIV-13 · Impermeabilización, revestimientos y protección de hormigón", "disciplina": "Civil"},
+    {"codigo": "CIV-14", "familia": "CIV-14 · Arquitectura y acabados", "disciplina": "Civil"},
+    {"codigo": "CIV-15", "familia": "CIV-15 · Urbanización y paisajismo", "disciplina": "Civil"},
+    {"codigo": "CIV-16", "familia": "CIV-16 · Servicios afectados y desvíos", "disciplina": "Civil"},
+    {"codigo": "CIV-17", "familia": "CIV-17 · Gestión de residuos", "disciplina": "Civil"},
+    # MECÁNICO
+    {"codigo": "MEC-01", "familia": "MEC-01 · Equipos mecánicos de proceso", "disciplina": "Mecánico"},
+    {"codigo": "MEC-02", "familia": "MEC-02 · Equipos específicos IDAM / OI / desalación", "disciplina": "Mecánico"},
+    {"codigo": "MEC-03", "familia": "MEC-03 · Tuberías de proceso", "disciplina": "Mecánico"},
+    {"codigo": "MEC-04", "familia": "MEC-04 · Válvulas, actuadores y compuertas", "disciplina": "Mecánico"},
+    {"codigo": "MEC-05", "familia": "MEC-05 · Dosificación química y reactivos", "disciplina": "Mecánico"},
+    {"codigo": "MEC-06", "familia": "MEC-06 · Elevación y manutención", "disciplina": "Mecánico"},
+    # ELÉCTRICO
+    {"codigo": "ELE-01", "familia": "ELE-01 · Alta y media tensión", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-02", "familia": "ELE-02 · Centros de transformación", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-03", "familia": "ELE-03 · Baja tensión, CCM y cuadros", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-04", "familia": "ELE-04 · Variadores, arrancadores y compensación", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-05", "familia": "ELE-05 · Cableado, bandejas y canalizaciones", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-06", "familia": "ELE-06 · Puesta a tierra y protección contra el rayo", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-07", "familia": "ELE-07 · Alumbrado", "disciplina": "Eléctrico"},
+    {"codigo": "ELE-08", "familia": "ELE-08 · Grupos electrógenos, SAI y baterías", "disciplina": "Eléctrico"},
+    # I&C
+    {"codigo": "ICA-01", "familia": "ICA-01 · Instrumentación de campo", "disciplina": "I&C"},
+    {"codigo": "ICA-02", "familia": "ICA-02 · Analizadores de proceso", "disciplina": "I&C"},
+    {"codigo": "ICA-03", "familia": "ICA-03 · PLC, RTU y control local", "disciplina": "I&C"},
+    {"codigo": "ICA-04", "familia": "ICA-04 · SCADA y supervisión", "disciplina": "I&C"},
+    {"codigo": "ICA-05", "familia": "ICA-05 · Telecomunicaciones y red OT", "disciplina": "I&C"},
+    {"codigo": "ICA-06", "familia": "ICA-06 · CCTV, control de accesos y seguridad electrónica", "disciplina": "I&C"},
+    # BUILDING SERVICES / MEP
+    {"codigo": "MEP-01", "familia": "MEP-01 · HVAC", "disciplina": "Building services"},
+    {"codigo": "MEP-02", "familia": "MEP-02 · Protección contra incendios", "disciplina": "Building services"},
+    {"codigo": "MEP-03", "familia": "MEP-03 · Fontanería, saneamiento interior y servicios de edificio", "disciplina": "Building services"},
+    # TRANSVERSALES
+    {"codigo": "TRV-01", "familia": "TRV-01 · Ingeniería, BIM y documentación técnica", "disciplina": "Transversal"},
+    {"codigo": "TRV-02", "familia": "TRV-02 · Permisos, legalizaciones y tasas", "disciplina": "Transversal"},
+    {"codigo": "TRV-03", "familia": "TRV-03 · Seguridad y salud", "disciplina": "Transversal"},
+    {"codigo": "TRV-04", "familia": "TRV-04 · Control de calidad y laboratorio", "disciplina": "Transversal"},
+    {"codigo": "TRV-05", "familia": "TRV-05 · Gestión medioambiental", "disciplina": "Transversal"},
+    {"codigo": "TRV-06", "familia": "TRV-06 · Pruebas, commissioning y garantías", "disciplina": "Transversal"},
+    {"codigo": "TRV-07", "familia": "TRV-07 · Explotación provisional / mantenimiento durante obras", "disciplina": "Transversal"},
+    {"codigo": "TRV-08", "familia": "TRV-08 · Indirectos de obra y medios generales", "disciplina": "Transversal"},
+    {"codigo": "TRV-99", "familia": "TRV-99 · Varios / pendiente de clasificar", "disciplina": "Transversal"},
 ]
+
+DISCIPLINAS = ["Todas", "Civil", "Mecánico", "Eléctrico", "I&C", "Building services", "Transversal"]
+
+def familias_por_disciplina(disciplina="Todas"):
+    if disciplina == "Todas":
+        return [f["familia"] for f in TAXONOMIA]
+    return [f["familia"] for f in TAXONOMIA if f["disciplina"] == disciplina]
+
+FAMILIAS_DEFAULT = [f["familia"] for f in TAXONOMIA]
+TAXONOMIA_TEXTO = "\n".join([f"{t['codigo']} | {t['familia']} | {t['disciplina']}" for t in TAXONOMIA])
+
 
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -492,7 +550,10 @@ elif paso == "2. Presupuesto":
         c3.metric("% importe cubierto", f"{imp_sel/total_imp*100:.1f}%" if total_imp else "—")
 
         st.markdown("**Selecciona qué partidas analizar y categoriza con IA**")
-        st.caption("Marca ✅ en la columna 'Analizar' las partidas que quieres incluir. Las más importantes ya están marcadas.")
+        st.caption("Marca ✅ en 'Analizar'. Filtra por disciplina para ver solo las familias relevantes.")
+
+        filtro_disc = st.selectbox("Filtrar familias por disciplina", DISCIPLINAS, key="filtro_disc_tabla")
+        familias_visibles = familias_por_disciplina(filtro_disc)
 
         col_config = {
             "Analizar": st.column_config.CheckboxColumn("Analizar ✅", default=False),
@@ -513,25 +574,25 @@ elif paso == "2. Presupuesto":
 
         col_a, col_b = st.columns(2)
         if col_a.button("🤖 Categorizar seleccionadas con IA"):
-            api_key = st.secrets.get("GEMINI_API_KEY", "")
+            api_key = st.secrets.get("OPENAI_API_KEY", "")
             if not api_key:
-                st.error("⚠️ Falta la API key de Anthropic en los Secrets de Streamlit. Ver instrucciones abajo.")
+                st.error("⚠️ Falta la API key de OpenAI en los Secrets de Streamlit. Añade: OPENAI_API_KEY = \"sk-...\"")
             else:
                 seleccionadas = edited[edited["Analizar"] == True].copy()
                 if seleccionadas.empty:
                     st.warning("No hay partidas seleccionadas.")
                 else:
-                    familias_str = ", ".join(FAMILIAS_DEFAULT)
                     descripciones = seleccionadas["Descripción"].fillna("").tolist()
                     indices_orig = seleccionadas.index.tolist()
 
-                    prompt = f"""Eres un experto en presupuestos de infraestructuras civiles e hidráulicas (depuradoras, desaladoras, conducciones, obras marítimas).
+                    prompt = f"""Eres un experto en presupuestos de construcción de infraestructuras hidráulicas (EDAR, IDAM, ETAP, conducciones, obras marítimas).
 
-Asigna cada partida a UNA de estas familias exactamente como están escritas:
-{familias_str}
+Asigna cada partida a UNA de estas familias. Usa exactamente el texto de la columna "Familia" tal como aparece:
 
-Responde ÚNICAMENTE con JSON, sin texto adicional ni bloques de código:
-[{{"indice": 0, "familia": "nombre exacto"}}, ...]
+{TAXONOMIA_TEXTO}
+
+Responde ÚNICAMENTE con JSON sin texto adicional ni bloques de código:
+[{{"indice": 0, "familia": "CIV-03 · Movimiento de tierras"}}, ...]
 
 Partidas (índice: descripción):
 """ + "\n".join([f"{i}: {d}" for i, d in enumerate(descripciones)])
@@ -539,18 +600,23 @@ Partidas (índice: descripción):
                     try:
                         with st.spinner("Categorizando con IA..."):
                             resp = requests.post(
-                                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
-                                headers={"Content-Type": "application/json"},
+                                "https://api.openai.com/v1/chat/completions",
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Authorization": f"Bearer {api_key}"
+                                },
                                 json={
-                                    "contents": [{"parts": [{"text": prompt}]}],
-                                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4000}
+                                    "model": "gpt-4o-mini",
+                                    "temperature": 0.1,
+                                    "max_tokens": 4000,
+                                    "messages": [{"role": "user", "content": prompt}]
                                 }
                             )
                             data = resp.json()
                             if "error" in data:
                                 st.error(f"Error API: {data['error']['message']}")
                             else:
-                                texto = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                                texto = data["choices"][0]["message"]["content"].strip()
                                 if texto.startswith("```"):
                                     texto = texto.split("```")[1]
                                     if texto.startswith("json"):
@@ -952,6 +1018,5 @@ elif paso == "6. Exportar":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.success("✓ Excel generado. Haz clic arriba para descargarlo.")
-
 
 
