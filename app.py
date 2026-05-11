@@ -316,6 +316,186 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPERS COMPARTIDOS
+# ═══════════════════════════════════════════════════════════════════════════════
+def parsear_num(valor):
+    try:
+        if isinstance(valor, (int, float)):
+            return float(valor)
+        s = str(valor).strip().replace(" ","").replace("€","").replace("$","").replace("£","")
+        if "," in s and "." in s:
+            s = s.replace(".","").replace(",",".")
+        elif "," in s:
+            s = s.replace(",",".")
+        return float(s)
+    except:
+        return None
+
+def col_letra(i):
+    result, n = "", i + 1
+    while n > 0:
+        n, r = divmod(n-1, 26)
+        result = chr(65+r) + result
+    return result
+
+def leer_excel_todas_hojas(archivo):
+    """Lee todas las hojas de un Excel. Devuelve dict {nombre_hoja: df}."""
+    try:
+        if archivo.name.endswith(".csv"):
+            return {"Hoja única": pd.read_csv(archivo)}, None
+        xls = pd.ExcelFile(archivo)
+        hojas = {}
+        for hoja in xls.sheet_names:
+            try:
+                df_raw = pd.read_excel(xls, sheet_name=hoja, header=None)
+                if df_raw.empty or len(df_raw) < 2:
+                    continue
+                header_row = 0
+                for i, row in df_raw.iterrows():
+                    if len(row.dropna()) >= 2:
+                        header_row = i
+                        break
+                df = pd.read_excel(xls, sheet_name=hoja, header=header_row)
+                df = df.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
+                if len(df) > 0:
+                    hojas[hoja] = df
+            except:
+                pass
+        return hojas, None
+    except Exception as e:
+        return {}, str(e)
+
+def call_ai(prompt, max_tokens=6000):
+    """Llama a la IA disponible (Gemini 1.5 Flash preferido, luego OpenAI)."""
+    gemini_key = st.secrets.get("GEMINI_API_KEY","")
+    openai_key = st.secrets.get("OPENAI_API_KEY","")
+
+    if gemini_key:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}",
+            headers={"Content-Type":"application/json"},
+            json={"contents":[{"parts":[{"text":prompt}]}],
+                  "generationConfig":{"temperature":0.1,"maxOutputTokens":max_tokens}}
+        )
+        data = resp.json()
+        if "error" in data:
+            raise Exception(data["error"]["message"])
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    elif openai_key:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Content-Type":"application/json","Authorization":f"Bearer {openai_key}"},
+            json={"model":"gpt-4o-mini","temperature":0.1,"max_tokens":max_tokens,
+                  "messages":[{"role":"user","content":prompt}]}
+        )
+        data = resp.json()
+        if "error" in data:
+            raise Exception(data["error"]["message"])
+        return data["choices"][0]["message"]["content"].strip()
+    else:
+        raise Exception("No hay API key configurada. Añade GEMINI_API_KEY u OPENAI_API_KEY en Secrets.")
+
+def limpiar_json_ia(texto):
+    """Limpia respuesta de IA y parsea JSON."""
+    t = texto.strip()
+    if t.startswith("```"):
+        t = t.split("```")[1]
+        if t.startswith("json"):
+            t = t[4:]
+    return json.loads(t.strip())
+
+def tiene_api_key():
+    return bool(st.secrets.get("GEMINI_API_KEY","") or st.secrets.get("OPENAI_API_KEY",""))
+
+def nombre_proveedor_ia():
+    if st.secrets.get("GEMINI_API_KEY",""):
+        return "Gemini 1.5 Flash"
+    elif st.secrets.get("OPENAI_API_KEY",""):
+        return "OpenAI GPT-4o mini"
+    return "IA"
+
+PALABRAS_RESUMEN = ["capítulo","capitulo","cap.","cap ","total","resumen","suma",
+                    "subtotal","sub-total","apartado","título","titulo","chapter",
+                    "section","total general","presupuesto total"]
+
+def es_fila_resumen(desc):
+    d = str(desc).lower().strip()
+    return any(d.startswith(p) for p in PALABRAS_RESUMEN) or d in ["","nan"]
+
+def calcular_precio_actualizado(precio, año_ref, familia, tasa_col=None):
+    años = max(0, date.today().year - int(año_ref))
+    if años == 0:
+        return precio
+    if tasa_col and tasa_col > 0:
+        tasa = tasa_col
+    else:
+        disc = next((t["disciplina"] for t in TAXONOMIA if t["familia"] == familia), None)
+        td = st.session_state.get("tasas_familia", {}).get(disc, 0.0) if disc else 0.0
+        tasa = td if td > 0 else st.session_state.get("tasa_general", 3.0)
+    return round(precio * ((1 + tasa/100) ** años), 2)
+
+def selector_hojas(hojas_dict, key_prefix):
+    """Muestra selector de hoja si hay más de una."""
+    if not hojas_dict:
+        return None, None
+    nombres = list(hojas_dict.keys())
+    if len(nombres) == 1:
+        return nombres[0], hojas_dict[nombres[0]]
+    sel = st.selectbox(f"El archivo tiene {len(nombres)} hojas. ¿Cuál contiene los datos?",
+                       nombres, key=f"{key_prefix}_hoja")
+    return sel, hojas_dict[sel]
+
+def analizar_excel_con_ia(df, contexto, moneda="EUR"):
+    """Usa IA para detectar columnas Y categorizar partidas en un solo paso."""
+    sample = df.head(30).to_string(index=True, max_colwidth=80)
+    cols_info = ", ".join([f"{col_letra(i)}: {c}" for i, c in enumerate(df.columns)])
+
+    prompt = f"""Eres experto en presupuestos de construcción de infraestructuras hidráulicas (EDAR, IDAM, ETAP, conducciones).
+
+Analiza este fragmento de Excel de {contexto} (moneda: {moneda}).
+Columnas disponibles: {cols_info}
+
+Primeras filas:
+{sample}
+
+Tarea:
+1. Identifica qué columna contiene: descripción, precio unitario, medición/cantidad, importe total, unidad. Usa letras de columna.
+2. Para cada fila que sea una partida real (no un resumen/capítulo/total), asigna una familia de esta lista:
+{TAXONOMIA_TEXTO}
+
+IMPORTANTE: Ignora filas que sean capítulos, subtotales, totales o filas vacías.
+Solo incluye partidas con descripción real y precio > 0.
+
+Responde SOLO con este JSON (sin texto adicional):
+{{
+  "columnas": {{
+    "descripcion": "letra_columna o null",
+    "precio_unitario": "letra_columna o null",
+    "medicion": "letra_columna o null",
+    "importe_total": "letra_columna o null",
+    "unidad": "letra_columna o null"
+  }},
+  "partidas": [
+    {{"fila": 0, "familia": "CIV-03 · Movimiento de tierras", "descripcion_limpia": "texto limpio"}}
+  ]
+}}"""
+    return limpiar_json_ia(call_ai(prompt, max_tokens=8000))
+
+def letra_a_col(letra, df):
+    """Convierte letra Excel (A, B...) al nombre de columna del DataFrame."""
+    if not letra or letra == "null":
+        return None
+    idx = 0
+    for c in letra.upper():
+        idx = idx * 26 + (ord(c) - 64)
+    idx -= 1
+    if 0 <= idx < len(df.columns):
+        return df.columns[idx]
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PASO 1 — PROYECTO
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -323,7 +503,7 @@ if paso == "1. Proyecto":
     st.markdown("""
     <div class="step-header">
         <h2>Paso 1 · Identificar el proyecto</h2>
-        <p>Datos básicos de la licitación que vamos a analizar</p>
+        <p>Datos básicos de la licitación</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -331,59 +511,54 @@ if paso == "1. Proyecto":
 
     col1, col2 = st.columns(2)
     with col1:
-        nombre = st.text_input("Nombre del proyecto", value=p.get("nombre", ""), placeholder="EDAR El Marco — Cáceres")
-        tipologia = st.selectbox("Tipología", ["EDAR", "IDAM / Desaladora", "ETAP", "Colectores y saneamiento", "Obra marítima", "Infraestructura hidráulica", "Otro"],
-                                  index=["EDAR", "IDAM / Desaladora", "ETAP", "Colectores y saneamiento", "Obra marítima", "Infraestructura hidráulica", "Otro"].index(p.get("tipologia", "EDAR")) if p.get("tipologia") else 0)
-        pais = st.text_input("País", value=p.get("pais", "España"))
-        promotor = st.text_input("Promotor / Cliente", value=p.get("promotor", ""), placeholder="Ayuntamiento de Cáceres")
+        nombre    = st.text_input("Nombre del proyecto", value=p.get("nombre",""), placeholder="EDAR El Marco — Cáceres")
+        tipologia = st.selectbox("Tipología", ["EDAR","IDAM / Desaladora","ETAP","Colectores y saneamiento","Obra marítima","Infraestructura hidráulica","Otro"],
+                                  index=["EDAR","IDAM / Desaladora","ETAP","Colectores y saneamiento","Obra marítima","Infraestructura hidráulica","Otro"].index(p.get("tipologia","EDAR")) if p.get("tipologia") else 0)
+        pais      = st.text_input("País", value=p.get("pais","España"))
+        promotor  = st.text_input("Promotor / Cliente", value=p.get("promotor",""), placeholder="Ayuntamiento de Cáceres")
 
     with col2:
         fecha_limite = st.date_input("Fecha límite de presentación",
                                       value=date.fromisoformat(p["fecha_limite"]) if p.get("fecha_limite") else date.today())
-        presupuesto_texto = st.text_input(
-            "Presupuesto de licitación (€)",
-            value=p.get("presupuesto_texto", ""),
-            placeholder="37.166.355,32"
-        )
-        expediente = st.text_input("Nº expediente / referencia interna", value=p.get("expediente", ""))
-        responsable = st.text_input("Técnico responsable del análisis", value=p.get("responsable", ""))
 
-    notas = st.text_area("Notas sobre el proyecto", value=p.get("notas", ""), placeholder="Aspectos relevantes, condiciones particulares, plazos de ejecución...")
+        c_mon1, c_mon2 = st.columns([2,1])
+        moneda_cod = c_mon1.selectbox("Moneda", ["EUR","USD","GBP","MAD","SAR","AUD","CNY","HKD","SGD","AED","QAR","KWD","Otra"],
+                                       index=["EUR","USD","GBP","MAD","SAR","AUD","CNY","HKD","SGD","AED","QAR","KWD","Otra"].index(p.get("moneda_cod","EUR")) if p.get("moneda_cod") in ["EUR","USD","GBP","MAD","SAR","AUD","CNY","HKD","SGD","AED","QAR","KWD"] else 0)
+        moneda_otra = c_mon2.text_input("Si Otra:", value=p.get("moneda_otra",""), placeholder="BRL, MXN...")
+        moneda_final = moneda_otra.strip().upper() if moneda_cod == "Otra" and moneda_otra.strip() else moneda_cod
 
-    st.markdown("<hr>", unsafe_allow_html=True)
+        presupuesto_texto = st.text_input("Presupuesto de licitación", value=p.get("presupuesto_texto",""),
+                                           placeholder="37.166.355,32")
+        expediente  = st.text_input("Nº expediente / referencia interna", value=p.get("expediente",""))
+        responsable = st.text_input("Técnico responsable", value=p.get("responsable",""))
+
+    notas = st.text_area("Notas sobre el proyecto", value=p.get("notas",""))
 
     def parsear_importe(texto):
         try:
-            limpio = texto.strip().replace("€", "").replace(" ", "").replace(".", "").replace(",", ".")
-            return float(limpio)
+            return float(texto.strip().replace("€","").replace(" ","").replace(".","").replace(",","."))
         except:
             return 0.0
 
     if st.button("💾 Guardar datos del proyecto"):
-        presupuesto_valor = parsear_importe(presupuesto_texto)
         st.session_state.proyecto = {
-            "nombre": nombre,
-            "tipologia": tipologia,
-            "pais": pais,
-            "promotor": promotor,
+            "nombre": nombre, "tipologia": tipologia, "pais": pais, "promotor": promotor,
             "fecha_limite": str(fecha_limite),
-            "presupuesto": presupuesto_valor,
+            "moneda_cod": moneda_cod, "moneda_otra": moneda_otra, "moneda": moneda_final,
+            "presupuesto": parsear_importe(presupuesto_texto),
             "presupuesto_texto": presupuesto_texto,
-            "expediente": expediente,
-            "responsable": responsable,
-            "notas": notas,
+            "expediente": expediente, "responsable": responsable, "notas": notas,
         }
-        st.success(f"✓ Proyecto '{nombre}' guardado correctamente")
+        st.success(f"✓ Proyecto '{nombre}' guardado — Moneda: {moneda_final}")
 
-    # Resumen si ya hay datos
     if st.session_state.proyecto:
         p = st.session_state.proyecto
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
-        pres = p.get("presupuesto", 0)
-        col1.metric("Presupuesto", f"{pres:,.2f} €" if pres else "—")
-        col2.metric("Tipología", p.get("tipologia", "—"))
-        col3.metric("Fecha límite", p.get("fecha_limite", "—"))
+        c1, c2, c3, c4 = st.columns(4)
+        pres = p.get("presupuesto",0)
+        c1.metric("Presupuesto", f"{pres:,.2f} {p.get('moneda','EUR')}" if pres else "—")
+        c2.metric("Tipología", p.get("tipologia","—"))
+        c3.metric("País", p.get("pais","—"))
+        c4.metric("Fecha límite", p.get("fecha_limite","—"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -392,276 +567,154 @@ if paso == "1. Proyecto":
 elif paso == "2. Presupuesto":
     st.markdown("""
     <div class="step-header">
-        <h2>Paso 2 · Cargar y seleccionar partidas</h2>
-        <p>Sube el Excel del proyecto. La herramienta identifica las partidas más relevantes automáticamente.</p>
+        <h2>Paso 2 · Cargar y categorizar el presupuesto</h2>
+        <p>Sube el Excel del proyecto. La IA detecta columnas, filtra resúmenes y categoriza automáticamente.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    def parsear_numero_eu(valor):
-        """Convierte número en formato europeo (1.234,56) a float."""
-        try:
-            if isinstance(valor, (int, float)):
-                return float(valor)
-            s = str(valor).strip().replace(" ", "").replace("€", "")
-            # Formato europeo: punto como miles, coma como decimal
-            if "," in s and "." in s:
-                s = s.replace(".", "").replace(",", ".")
-            elif "," in s:
-                s = s.replace(",", ".")
-            return float(s)
-        except:
-            return None
+    if not tiene_api_key():
+        st.markdown("""<div class="info-box-red">
+        ⚠️ <strong>Necesitas configurar una API key de IA</strong> en Streamlit → Settings → Secrets:<br>
+        <code>GEMINI_API_KEY = "AIza..."</code> (gratuito) · o · <code>OPENAI_API_KEY = "sk-..."</code><br>
+        Obtén Gemini gratis en <strong>aistudio.google.com</strong>
+        </div>""", unsafe_allow_html=True)
 
-    def col_letra(i):
-        """Devuelve letra de columna estilo Excel: A, B, ..., Z, AA, AB..."""
-        result = ""
-        n = i + 1
-        while n > 0:
-            n, r = divmod(n - 1, 26)
-            result = chr(65 + r) + result
-        return result
+    moneda_proy = st.session_state.proyecto.get("moneda","EUR") if st.session_state.proyecto else "EUR"
 
-    archivo = st.file_uploader("📂 Subir Excel del presupuesto", type=["xlsx", "xls", "csv"])
+    archivo = st.file_uploader("📂 Subir Excel del presupuesto", type=["xlsx","xls","csv"])
 
     if archivo:
-        try:
-            if archivo.name.endswith(".csv"):
-                df_raw = pd.read_csv(archivo)
-            else:
-                df_raw = pd.read_excel(archivo, header=None)
-                # Detectar fila de cabeceras
-                header_row = 0
-                for i, row in df_raw.iterrows():
-                    if len(row.dropna()) >= 3:
-                        header_row = i
-                        break
-                df_raw = pd.read_excel(archivo, header=header_row)
-                df_raw = df_raw.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
+        hojas, err = leer_excel_todas_hojas(archivo)
+        if err:
+            st.error(f"Error al leer: {err}")
+        elif not hojas:
+            st.error("El archivo no contiene datos legibles.")
+        else:
+            hoja_sel, df_raw = selector_hojas(hojas, "ppto")
 
-            # Construir etiquetas columna: "A · Código", "B · Descripción", etc.
-            etiquetas = {col: f"{col_letra(i)} · {col}" for i, col in enumerate(df_raw.columns)}
-            etiquetas_lista = ["— no incluida —"] + [etiquetas[c] for c in df_raw.columns]
-            etiqueta_a_col = {v: k for k, v in etiquetas.items()}
+            if df_raw is not None:
+                st.success(f"✓ Hoja '{hoja_sel}': {len(df_raw)} filas · {len(df_raw.columns)} columnas")
+                df_prev = df_raw.head(8).copy()
+                df_prev.columns = [f"{col_letra(i)} · {c}" for i, c in enumerate(df_raw.columns)]
+                st.dataframe(df_prev, use_container_width=True)
 
-            st.success(f"✓ Archivo leído: {len(df_raw)} filas · {len(df_raw.columns)} columnas")
+                if st.button(f"🤖 Analizar con {nombre_proveedor_ia()}", key="btn_ppto"):
+                    if not tiene_api_key():
+                        st.error("Configura una API key primero.")
+                    else:
+                        with st.spinner("La IA está leyendo el presupuesto y categorizando partidas..."):
+                            try:
+                                resultado = analizar_excel_con_ia(df_raw, "presupuesto de licitación", moneda_proy)
 
-            st.markdown("**Vista previa (primeras 6 filas)**")
-            df_preview = df_raw.head(6).copy()
-            df_preview.columns = [f"{col_letra(i)} · {c}" for i, c in enumerate(df_raw.columns)]
-            st.dataframe(df_preview, use_container_width=True)
+                                cols = resultado.get("columnas", {})
+                                partidas_ia = resultado.get("partidas", [])
 
-            st.markdown("---")
-            st.markdown("**Indica qué columna contiene cada dato**")
-            st.caption("Las letras (A, B, C...) corresponden a las columnas del Excel tal como están en la vista previa.")
+                                col_desc = letra_a_col(cols.get("descripcion"), df_raw)
+                                col_pu   = letra_a_col(cols.get("precio_unitario"), df_raw)
+                                col_med  = letra_a_col(cols.get("medicion"), df_raw)
+                                col_imp  = letra_a_col(cols.get("importe_total"), df_raw)
+                                col_uni  = letra_a_col(cols.get("unidad"), df_raw)
 
-            c1, c2, c3 = st.columns(3)
-            sel_desc = c1.selectbox("Descripción ✱", etiquetas_lista, key="sel_desc")
-            sel_imp  = c2.selectbox("Importe total ✱", etiquetas_lista, key="sel_imp")
-            sel_pu   = c3.selectbox("Precio unitario", etiquetas_lista, key="sel_pu")
+                                filas_ia = {p["fila"]: p for p in partidas_ia}
+                                registros = []
+                                for idx, p_ia in filas_ia.items():
+                                    if 0 <= idx < len(df_raw):
+                                        row = df_raw.iloc[idx]
+                                        r = {
+                                            "Descripción": p_ia.get("descripcion_limpia") or (str(row[col_desc]).strip() if col_desc else ""),
+                                            "Familia": p_ia.get("familia","TRV-99 · Varios / pendiente de clasificar"),
+                                            "Precio unitario": parsear_num(row[col_pu]) if col_pu else None,
+                                            "Medición": parsear_num(row[col_med]) if col_med else None,
+                                            "Importe total": parsear_num(row[col_imp]) if col_imp else None,
+                                            "Unidad": str(row[col_uni]).strip() if col_uni else "",
+                                            "Analizar": False,
+                                        }
+                                        imp = r["Importe total"] or 0
+                                        if imp > 0 or (r["Precio unitario"] or 0) > 0:
+                                            registros.append(r)
 
-            c4, c5 = st.columns(2)
-            sel_med  = c4.selectbox("Medición / cantidad", etiquetas_lista, key="sel_med")
-            sel_uni  = c5.selectbox("Unidad", etiquetas_lista, key="sel_uni")
-            sel_cod  = st.selectbox("Código / referencia (opcional)", etiquetas_lista, key="sel_cod")
+                                df_part = pd.DataFrame(registros)
+                                if df_part.empty:
+                                    st.warning("La IA no encontró partidas con precio. Revisa el archivo.")
+                                else:
+                                    # Pre-seleccionar top 80% por importe
+                                    df_part["Importe total"] = pd.to_numeric(df_part["Importe total"], errors="coerce").fillna(0)
+                                    df_sorted = df_part.sort_values("Importe total", ascending=False)
+                                    total_imp = df_sorted["Importe total"].sum()
+                                    acum, indices_top = 0, []
+                                    for idx2 in df_sorted.index:
+                                        acum += df_sorted.at[idx2,"Importe total"]
+                                        indices_top.append(idx2)
+                                        if total_imp > 0 and acum/total_imp >= 0.80:
+                                            break
+                                    df_part.loc[indices_top, "Analizar"] = True
+                                    st.session_state.partidas = df_part
+                                    n_sel = df_part["Analizar"].sum()
+                                    st.success(f"✓ {len(df_part)} partidas detectadas · {int(n_sel)} pre-seleccionadas (≥80% importe) · Familias asignadas por IA")
+                                    st.rerun()
 
-            if st.button("✅ Cargar partidas"):
-                if sel_desc == "— no incluida —" or sel_imp == "— no incluida —":
-                    st.error("⚠️ Descripción e Importe total son obligatorios.")
-                else:
-                    col_desc_real = etiqueta_a_col[sel_desc]
-                    col_imp_real  = etiqueta_a_col[sel_imp]
+                            except Exception as e:
+                                st.error(f"Error en análisis IA: {e}")
 
-                    cols_sel = {col_desc_real: "Descripción", col_imp_real: "Importe total"}
-                    if sel_pu  != "— no incluida —": cols_sel[etiqueta_a_col[sel_pu]]  = "Precio unitario"
-                    if sel_med != "— no incluida —": cols_sel[etiqueta_a_col[sel_med]] = "Medición"
-                    if sel_uni != "— no incluida —": cols_sel[etiqueta_a_col[sel_uni]] = "Unidad"
-                    if sel_cod != "— no incluida —": cols_sel[etiqueta_a_col[sel_cod]] = "Código"
-
-                    partidas = df_raw[list(cols_sel.keys())].rename(columns=cols_sel).copy()
-                    partidas["Importe total"] = partidas["Importe total"].apply(parsear_numero_eu)
-                    if "Precio unitario" in partidas.columns:
-                        partidas["Precio unitario"] = partidas["Precio unitario"].apply(parsear_numero_eu)
-                    if "Medición" in partidas.columns:
-                        partidas["Medición"] = partidas["Medición"].apply(parsear_numero_eu)
-
-                    partidas = partidas.dropna(subset=["Importe total"])
-                    partidas = partidas[partidas["Importe total"] > 0].reset_index(drop=True)
-
-                    # ── Filtrar filas de resumen / capítulo ──────────────────
-                    n_antes = len(partidas)
-                    PALABRAS_RESUMEN = [
-                        "capítulo", "capitulo", "cap.", "cap ", "total", "resumen",
-                        "suma", "subtotal", "sub-total", "apartado", "título", "titulo"
-                    ]
-                    def es_resumen(row):
-                        desc = str(row.get("Descripción", "")).strip().lower()
-                        # Si empieza por palabra de resumen → probable capítulo
-                        if any(desc.startswith(p) for p in PALABRAS_RESUMEN):
-                            return True
-                        # Si tiene precio unitario mapeado y es nulo o cero → resumen
-                        if "Precio unitario" in row and (pd.isna(row["Precio unitario"]) or row["Precio unitario"] == 0):
-                            return True
-                        return False
-
-                    mask_resumen = partidas.apply(es_resumen, axis=1)
-                    partidas_filtradas = partidas[~mask_resumen].reset_index(drop=True)
-                    n_filtradas = n_antes - len(partidas_filtradas)
-
-                    partidas_filtradas["Familia"] = "Sin asignar"
-                    partidas_filtradas["Analizar"] = False
-
-                    # Pre-seleccionar partidas hasta el 80% del importe acumulado
-                    partidas_sorted = partidas_filtradas.sort_values("Importe total", ascending=False).copy()
-                    total_imp = partidas_sorted["Importe total"].sum()
-                    acum = 0
-                    indices_top = []
-                    for idx in partidas_sorted.index:
-                        acum += partidas_sorted.at[idx, "Importe total"]
-                        indices_top.append(idx)
-                        if acum / total_imp >= 0.80:
-                            break
-                    partidas_filtradas.loc[indices_top, "Analizar"] = True
-
-                    # Guardar también las filas de resumen por separado por si acaso
-                    st.session_state.partidas = partidas_filtradas
-                    st.session_state.partidas_resumen = partidas[mask_resumen].reset_index(drop=True)
-
-                    msg = f"✓ {len(partidas_filtradas)} partidas unitarias cargadas"
-                    if n_filtradas > 0:
-                        msg += f" · {n_filtradas} filas de capítulo/resumen descartadas"
-                    msg += f" · {sum(partidas_filtradas['Analizar'])} pre-seleccionadas (≥80% del importe)"
-                    st.success(msg)
-                    st.rerun()
-
-        except Exception as e:
-            st.error(f"Error al leer el archivo: {e}")
-
-    # ── Selección y categorización ─────────────────────────────────────────────
+    # ── Tabla de partidas categorizadas ───────────────────────────────────────
     if not st.session_state.partidas.empty:
         df_part = st.session_state.partidas.copy()
-        total_imp = pd.to_numeric(df_part["Importe total"], errors="coerce").sum()
-        n_sel = df_part["Analizar"].sum() if "Analizar" in df_part.columns else 0
+        total_imp = pd.to_numeric(df_part.get("Importe total", pd.Series()), errors="coerce").sum()
+        n_sel = int(df_part.get("Analizar", pd.Series(dtype=bool)).sum())
         imp_sel = df_part[df_part.get("Analizar", False) == True]["Importe total"].sum() if "Analizar" in df_part.columns else 0
 
-        st.markdown("---")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total partidas", len(df_part))
-        c2.metric("Seleccionadas para análisis", int(n_sel))
+        c1.metric("Partidas", len(df_part))
+        c2.metric("Seleccionadas para análisis", n_sel)
         c3.metric("% importe cubierto", f"{imp_sel/total_imp*100:.1f}%" if total_imp else "—")
 
-        st.markdown("**Selecciona qué partidas analizar y categoriza con IA**")
-        st.caption("Marca ✅ en 'Analizar'. Filtra por disciplina para ver solo las familias relevantes.")
+        st.markdown("**Revisa la categorización. Marca ✅ las partidas a analizar.**")
+        st.caption("Las familias ya están asignadas por la IA. Corrige lo que no sea correcto antes de continuar.")
 
-        filtro_disc = st.selectbox("Filtrar familias por disciplina", DISCIPLINAS, key="filtro_disc_tabla")
-        familias_visibles = familias_por_disciplina(filtro_disc)
+        filtro_disc2 = st.selectbox("Filtrar tabla por disciplina", DISCIPLINAS, key="filtro_disc2")
+
+        # Guardar estado antes de mostrar editor
+        key_editor = "partidas_editor_v1"
+        df_show = df_part.copy()
 
         col_config = {
-            "Analizar": st.column_config.CheckboxColumn("Analizar ✅", default=False),
-            "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT, required=False),
-            "Importe total": st.column_config.NumberColumn("Importe total (€)", format="%.2f"),
+            "Analizar": st.column_config.CheckboxColumn("Analizar ✅"),
+            "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT),
+            "Importe total": st.column_config.NumberColumn("Importe (€)", format="%.2f"),
+            "Precio unitario": st.column_config.NumberColumn("P.Unit (€)", format="%.2f"),
+            "Medición": st.column_config.NumberColumn("Medición", format="%.2f"),
         }
-        if "Precio unitario" in df_part.columns:
-            col_config["Precio unitario"] = st.column_config.NumberColumn("P. Unitario (€)", format="%.2f")
 
         edited = st.data_editor(
-            df_part,
+            df_show,
             column_config=col_config,
             use_container_width=True,
             num_rows="fixed",
             height=420,
+            key=key_editor,
         )
-        st.session_state.partidas = edited
 
-        col_a, col_b = st.columns(2)
-        if col_a.button("🤖 Categorizar seleccionadas con IA"):
-            api_key = st.secrets.get("OPENAI_API_KEY", "")
-            if not api_key:
-                st.error("⚠️ Falta la API key de OpenAI en los Secrets de Streamlit. Añade: OPENAI_API_KEY = \"sk-...\"")
-            else:
-                seleccionadas = edited[edited["Analizar"] == True].copy()
-                if seleccionadas.empty:
-                    st.warning("No hay partidas seleccionadas.")
-                else:
-                    descripciones = seleccionadas["Descripción"].fillna("").tolist()
-                    indices_orig = seleccionadas.index.tolist()
-
-                    prompt = f"""Eres un experto en presupuestos de construcción de infraestructuras hidráulicas (EDAR, IDAM, ETAP, conducciones, obras marítimas).
-
-Asigna cada partida a UNA de estas familias. Usa exactamente el texto de la columna "Familia" tal como aparece:
-
-{TAXONOMIA_TEXTO}
-
-Responde ÚNICAMENTE con JSON sin texto adicional ni bloques de código:
-[{{"indice": 0, "familia": "CIV-03 · Movimiento de tierras"}}, ...]
-
-Partidas (índice: descripción):
-""" + "\n".join([f"{i}: {d}" for i, d in enumerate(descripciones)])
-
-                    try:
-                        with st.spinner("Categorizando con IA..."):
-                            resp = requests.post(
-                                "https://api.openai.com/v1/chat/completions",
-                                headers={
-                                    "Content-Type": "application/json",
-                                    "Authorization": f"Bearer {api_key}"
-                                },
-                                json={
-                                    "model": "gpt-4o-mini",
-                                    "temperature": 0.1,
-                                    "max_tokens": 4000,
-                                    "messages": [{"role": "user", "content": prompt}]
-                                }
-                            )
-                            data = resp.json()
-                            if "error" in data:
-                                st.error(f"Error API: {data['error']['message']}")
-                            else:
-                                texto = data["choices"][0]["message"]["content"].strip()
-                                if texto.startswith("```"):
-                                    texto = texto.split("```")[1]
-                                    if texto.startswith("json"):
-                                        texto = texto[4:]
-                                asignaciones = json.loads(texto.strip())
-                                df_result = st.session_state.partidas.copy()
-                                for item in asignaciones:
-                                    idx_local = item["indice"]
-                                    if idx_local < len(indices_orig):
-                                        idx_real = indices_orig[idx_local]
-                                        df_result.at[idx_real, "Familia"] = item["familia"]
-                                st.session_state.partidas = df_result
-                                st.success(f"✓ {len(asignaciones)} partidas categorizadas. Revisa y ajusta si es necesario.")
-                                st.rerun()
-                    except Exception as e:
-                        st.error(f"Error inesperado: {e}")
-
-        if col_b.button("💾 Guardar selección y familias"):
+        c_a, c_b = st.columns(2)
+        if c_a.button("💾 Guardar cambios"):
+            st.session_state.partidas = edited
             st.success("✓ Guardado")
+        if c_b.button("🔄 Recategorizar con IA"):
+            st.session_state.partidas = edited
+            st.info("Sube de nuevo el archivo para recategorizar.")
 
-        # Resumen por familia (solo seleccionadas)
-        df_sel = st.session_state.partidas[st.session_state.partidas.get("Analizar", False) == True].copy() if "Analizar" in st.session_state.partidas.columns else pd.DataFrame()
-        if not df_sel.empty and "Familia" in df_sel.columns:
+        # Resumen por familia
+        if "Familia" in edited.columns:
             st.markdown("---")
-            st.markdown("**Resumen por familia (partidas seleccionadas)**")
-            df_sel["Importe total"] = pd.to_numeric(df_sel["Importe total"], errors="coerce")
-            resumen_fam = df_sel.groupby("Familia")["Importe total"].sum().reset_index()
-            resumen_fam.columns = ["Familia", "Importe (€)"]
-            resumen_fam = resumen_fam.sort_values("Importe (€)", ascending=False)
-            total_r = resumen_fam["Importe (€)"].sum()
-            resumen_fam["% s/ total"] = (resumen_fam["Importe (€)"] / total_r * 100).round(1).astype(str) + "%"
-            resumen_fam["Importe (€)"] = resumen_fam["Importe (€)"].map("{:,.0f}".format)
-            st.dataframe(resumen_fam, use_container_width=True, hide_index=True)
-
-        if not st.secrets.get("GEMINI_API_KEY", ""):
-            st.markdown("---")
-            st.markdown("""
-            <div class="info-box">
-            <strong>⚙️ Configura la API key de Gemini para activar la IA</strong><br><br>
-            1. Ve a <strong>share.streamlit.io</strong> → tu app → <strong>Settings → Secrets</strong><br>
-            2. Añade: <code>GEMINI_API_KEY = "AIza..."</code><br>
-            3. Guarda — la app se reinicia sola.<br><br>
-            Obtén tu clave gratuita en <strong>aistudio.google.com</strong>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("**Resumen por familia (partidas marcadas)**")
+            df_sel2 = edited[edited.get("Analizar", False) == True].copy() if "Analizar" in edited.columns else edited.copy()
+            df_sel2["Importe total"] = pd.to_numeric(df_sel2["Importe total"], errors="coerce")
+            resumen = df_sel2.groupby("Familia")["Importe total"].agg(["sum","count"]).reset_index()
+            resumen.columns = ["Familia","Importe (€)","Nº partidas"]
+            resumen = resumen.sort_values("Importe (€)", ascending=False)
+            total_r = resumen["Importe (€)"].sum()
+            resumen["% s/total"] = (resumen["Importe (€)"]/total_r*100).round(1).astype(str) + "%" if total_r else "—"
+            resumen["Importe (€)"] = resumen["Importe (€)"].map("{:,.0f}".format)
+            st.dataframe(resumen, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -671,274 +724,131 @@ elif paso == "3. Referencias":
     st.markdown("""
     <div class="step-header">
         <h2>Paso 3 · Referencias de obras anteriores</h2>
-        <p>Sube Excels de obras propias. La IA cruza las partidas con la taxonomía y extrae precios de referencia.</p>
+        <p>Sube Excels de obras propias. La IA interpreta la estructura y extrae precios de referencia.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    def leer_excel_generico(archivo):
-        """Lee un Excel detectando automáticamente la fila de cabecera."""
-        try:
-            if archivo.name.endswith(".csv"):
-                return pd.read_csv(archivo), None
-            df_raw = pd.read_excel(archivo, header=None)
-            header_row = 0
-            for i, row in df_raw.iterrows():
-                if len(row.dropna()) >= 3:
-                    header_row = i
-                    break
-            df = pd.read_excel(archivo, header=header_row)
-            df = df.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
-            return df, None
-        except Exception as e:
-            return None, str(e)
+    if not tiene_api_key():
+        st.markdown("""<div class="info-box-red">⚠️ Necesitas configurar una API key. Ver Paso 2.</div>""", unsafe_allow_html=True)
 
-    def col_letra(i):
-        result, n = "", i + 1
-        while n > 0:
-            n, r = divmod(n - 1, 26)
-            result = chr(65 + r) + result
-        return result
+    # Tasas de actualización
+    with st.expander("⚙️ Tasas de actualización de precios", expanded=False):
+        st.caption(f"Actualiza precios al año en curso ({date.today().year}). Prioridad: Excel > por disciplina > general.")
+        tasa_general = st.number_input("Tasa general anual (%)", 0.0, 30.0,
+                                        value=st.session_state.get("tasa_general",3.0), step=0.5, key="tg_inp", format="%.1f")
+        st.session_state["tasa_general"] = tasa_general
+        tasas_familia = st.session_state.get("tasas_familia",{})
+        disc_cols = st.columns(3)
+        for i, disc in enumerate(["Civil","Mecánico","Eléctrico","I&C","Building services","Transversal"]):
+            v = disc_cols[i%3].number_input(disc, 0.0, 30.0, value=tasas_familia.get(disc,0.0), step=0.5, key=f"tf_{disc}", format="%.1f")
+            tasas_familia[disc] = v
+        st.session_state["tasas_familia"] = tasas_familia
 
-    def parsear_num(valor):
-        try:
-            if isinstance(valor, (int, float)):
-                return float(valor)
-            s = str(valor).strip().replace(" ", "").replace("€", "").replace("$", "")
-            if "," in s and "." in s:
-                s = s.replace(".", "").replace(",", ".")
-            elif "," in s:
-                s = s.replace(",", ".")
-            return float(s)
-        except:
-            return None
-
-    def call_openai(prompt, api_key, max_tokens=4000):
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": "gpt-4o-mini", "temperature": 0.1, "max_tokens": max_tokens,
-                  "messages": [{"role": "user", "content": prompt}]}
-        )
-        data = resp.json()
-        if "error" in data:
-            raise Exception(data["error"]["message"])
-        texto = data["choices"][0]["message"]["content"].strip()
-        if texto.startswith("```"):
-            texto = texto.split("```")[1]
-            if texto.startswith("json"):
-                texto = texto[4:]
-        return texto.strip()
-
-    # ── Metadatos de la obra de referencia ────────────────────────────────────
     st.markdown("**Datos de la obra de referencia**")
     c1, c2, c3, c4 = st.columns(4)
     ref_nombre = c1.text_input("Nombre de la obra", key="ref_nombre", placeholder="EDAR El Marco, Cáceres")
     ref_pais   = c2.text_input("País", key="ref_pais", value="España")
-    ref_anio   = c3.number_input("Año", min_value=2000, max_value=2030, value=2022, key="ref_anio")
-    ref_moneda = c4.text_input("Moneda", key="ref_moneda", value="EUR", placeholder="EUR, USD, MAD, SAR...")
+    ref_anio   = c3.number_input("Año", 2000, 2030, value=2022, key="ref_anio")
+    ref_moneda = c4.text_input("Moneda", key="ref_moneda", value="EUR", placeholder="EUR, USD, MAD...")
 
-    # ── Tasas de actualización ───────────────────────────────────────────────
-    with st.expander("⚙️ Tasas de actualización de precios", expanded=False):
-        st.caption(f"Se actualizan los precios al año en curso ({date.today().year}). Prioridad: columna Excel > tasa por familia > tasa general.")
-
-        tasa_general = st.number_input("Tasa general anual (%)", min_value=0.0, max_value=30.0,
-                                        value=st.session_state.get("tasa_general", 3.0), step=0.5,
-                                        key="tasa_general_inp", format="%.1f")
-        st.session_state["tasa_general"] = tasa_general
-
-        st.markdown("**Tasas por disciplina** (dejar en 0 para usar la tasa general)")
-        tasas_familia = st.session_state.get("tasas_familia", {})
-        disc_cols = st.columns(3)
-        disciplinas_lista = ["Civil", "Mecánico", "Eléctrico", "I&C", "Building services", "Transversal"]
-        for i, disc in enumerate(disciplinas_lista):
-            val = tasas_familia.get(disc, 0.0)
-            nuevo = disc_cols[i % 3].number_input(
-                disc, min_value=0.0, max_value=30.0, value=val, step=0.5,
-                key=f"tasa_{disc}", format="%.1f"
-            )
-            tasas_familia[disc] = nuevo
-        st.session_state["tasas_familia"] = tasas_familia
-
-    def calcular_precio_actualizado(precio_orig, año_ref, familia, col_tasa=None):
-        """Aplica tasa compuesta. Prioridad: columna Excel > familia > general."""
-        año_actual = date.today().year
-        años = max(0, año_actual - int(año_ref))
-        if años == 0:
-            return precio_orig
-
-        # Determinar tasa a aplicar
-        if col_tasa is not None and col_tasa > 0:
-            tasa = col_tasa
-        else:
-            # Buscar disciplina de la familia
-            disc_fam = next((t["disciplina"] for t in TAXONOMIA if t["familia"] == familia), None)
-            tasa_disc = st.session_state.get("tasas_familia", {}).get(disc_fam, 0.0) if disc_fam else 0.0
-            tasa = tasa_disc if tasa_disc > 0 else st.session_state.get("tasa_general", 3.0)
-
-        return round(precio_orig * ((1 + tasa / 100) ** años), 2)
-
-    archivo_ref = st.file_uploader("📂 Subir Excel de la obra de referencia", type=["xlsx", "xls", "csv"], key="up_ref")
+    archivo_ref = st.file_uploader("📂 Subir Excel de la obra de referencia", type=["xlsx","xls","csv"], key="up_ref")
 
     if archivo_ref:
-        df_ref, err = leer_excel_generico(archivo_ref)
-        if err:
-            st.error(f"Error al leer el archivo: {err}")
+        hojas_ref, err_ref = leer_excel_todas_hojas(archivo_ref)
+        if err_ref:
+            st.error(f"Error: {err_ref}")
+        elif not hojas_ref:
+            st.error("No se encontraron datos legibles.")
         else:
-            etiquetas = {col: f"{col_letra(i)} · {col}" for i, col in enumerate(df_ref.columns)}
-            etiquetas_lista = ["— no incluida —"] + list(etiquetas.values())
-            etiqueta_a_col = {v: k for k, v in etiquetas.items()}
+            hoja_ref_sel, df_ref_raw = selector_hojas(hojas_ref, "ref")
+            if df_ref_raw is not None:
+                st.success(f"✓ Hoja \"{hoja_ref_sel}\": {len(df_ref_raw)} filas · {len(df_ref_raw.columns)} columnas")
+                st.dataframe(df_ref_raw.head(6).rename(columns={c: f"{col_letra(i)}·{c}" for i,c in enumerate(df_ref_raw.columns)}), use_container_width=True)
 
-            st.success(f"✓ {len(df_ref)} filas · {len(df_ref.columns)} columnas")
-            df_prev = df_ref.head(6).copy()
-            df_prev.columns = [f"{col_letra(i)} · {c}" for i, c in enumerate(df_ref.columns)]
-            st.dataframe(df_prev, use_container_width=True)
+                if st.button(f"🤖 Interpretar con {nombre_proveedor_ia()}", key="btn_ref"):
+                    if not ref_nombre:
+                        st.error("Indica el nombre de la obra.")
+                    elif not tiene_api_key():
+                        st.error("Configura una API key.")
+                    else:
+                        with st.spinner("Analizando la obra de referencia con IA..."):
+                            try:
+                                resultado = analizar_excel_con_ia(df_ref_raw, f"obra de referencia: {ref_nombre}", ref_moneda)
+                                cols = resultado.get("columnas",{})
+                                partidas_ia = resultado.get("partidas",[])
 
-            st.markdown("**Indica las columnas**")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            s_desc  = c1.selectbox("Descripción ✱", etiquetas_lista, key="rs_desc")
-            s_pu    = c2.selectbox("Precio unitario ✱", etiquetas_lista, key="rs_pu")
-            s_uni   = c3.selectbox("Unidad", etiquetas_lista, key="rs_uni")
-            s_imp   = c4.selectbox("Importe total", etiquetas_lista, key="rs_imp")
-            s_tasa  = c5.selectbox("Col. tasa revisión % (si existe)", etiquetas_lista, key="rs_tasa")
+                                col_desc = letra_a_col(cols.get("descripcion"), df_ref_raw)
+                                col_pu   = letra_a_col(cols.get("precio_unitario"), df_ref_raw)
+                                col_med  = letra_a_col(cols.get("medicion"), df_ref_raw)
+                                col_imp  = letra_a_col(cols.get("importe_total"), df_ref_raw)
+                                col_uni  = letra_a_col(cols.get("unidad"), df_ref_raw)
 
-            if st.button("✅ Cargar y categorizar con IA", key="btn_ref"):
-                api_key = st.secrets.get("OPENAI_API_KEY", "")
-                if not ref_nombre:
-                    st.error("Indica el nombre de la obra antes de continuar.")
-                elif s_desc == "— no incluida —" or s_pu == "— no incluida —":
-                    st.error("Descripción y Precio unitario son obligatorios.")
-                elif not api_key:
-                    st.error("⚠️ Falta OPENAI_API_KEY en Secrets.")
-                else:
-                    cols_map = {etiqueta_a_col[s_desc]: "Descripción", etiqueta_a_col[s_pu]: "Precio unitario"}
-                    if s_uni  != "— no incluida —": cols_map[etiqueta_a_col[s_uni]]  = "Unidad"
-                    if s_imp  != "— no incluida —": cols_map[etiqueta_a_col[s_imp]]  = "Importe total"
-                    if s_tasa != "— no incluida —": cols_map[etiqueta_a_col[s_tasa]] = "Tasa revisión %"
+                                filas_ia = {p["fila"]: p for p in partidas_ia}
+                                registros = []
+                                for idx, p_ia in filas_ia.items():
+                                    if 0 <= idx < len(df_ref_raw):
+                                        row = df_ref_raw.iloc[idx]
+                                        pu = parsear_num(row[col_pu]) if col_pu else None
+                                        if not pu or pu <= 0:
+                                            continue
+                                        familia = p_ia.get("familia","TRV-99 · Varios / pendiente de clasificar")
+                                        pu_act = calcular_precio_actualizado(pu, ref_anio, familia)
+                                        disc_f = next((t["disciplina"] for t in TAXONOMIA if t["familia"]==familia), "—")
+                                        registros.append({
+                                            "Descripción": p_ia.get("descripcion_limpia") or (str(row[col_desc]).strip() if col_desc else ""),
+                                            "Familia": familia,
+                                            "Unidad": str(row[col_uni]).strip() if col_uni else "",
+                                            "Medición": parsear_num(row[col_med]) if col_med else None,
+                                            "Importe total": parsear_num(row[col_imp]) if col_imp else None,
+                                            "P. original": pu,
+                                            "Precio unitario": pu_act,
+                                            "Tasa aplicada": f"{st.session_state.get('tasas_familia',{}).get(disc_f, st.session_state.get('tasa_general',3.0))}%",
+                                            "Obra": ref_nombre, "País": ref_pais,
+                                            "Año": ref_anio, "Año actualizado": date.today().year,
+                                            "Moneda": ref_moneda, "Validado": False,
+                                        })
 
-                    df_work = df_ref[list(cols_map.keys())].rename(columns=cols_map).copy()
-                    df_work["Precio unitario"] = df_work["Precio unitario"].apply(parsear_num)
-                    if "Importe total" in df_work.columns:
-                        df_work["Importe total"] = df_work["Importe total"].apply(parsear_num)
-                    if "Tasa revisión %" in df_work.columns:
-                        df_work["Tasa revisión %"] = df_work["Tasa revisión %"].apply(parsear_num)
-                    df_work = df_work.dropna(subset=["Precio unitario"])
-                    df_work = df_work[df_work["Precio unitario"] > 0].reset_index(drop=True)
+                                df_ref_work = pd.DataFrame(registros)
+                                st.session_state["df_ref_preview"] = df_ref_work
+                                st.success(f"✓ {len(df_ref_work)} partidas interpretadas. Revisa antes de guardar.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error IA: {e}")
 
-                    PALABRAS_RESUMEN = ["capítulo","capitulo","cap.","cap ","total","resumen","suma","subtotal","apartado"]
-                    mask = df_work["Descripción"].apply(lambda d: any(str(d).lower().strip().startswith(p) for p in PALABRAS_RESUMEN))
-                    df_work = df_work[~mask].reset_index(drop=True)
-
-                    with st.spinner("Categorizando con IA..."):
-                        descs = df_work["Descripción"].fillna("").tolist()
-                        prompt = f"""Eres experto en presupuestos de infraestructuras hidráulicas.
-Asigna cada partida a UNA familia de esta lista (usa el texto exacto):
-{TAXONOMIA_TEXTO}
-
-Responde SOLO con JSON sin texto adicional:
-[{{"indice": 0, "familia": "CIV-03 · Movimiento de tierras"}}, ...]
-
-Partidas:
-""" + "\n".join([f"{i}: {d}" for i, d in enumerate(descs)])
-
-                        try:
-                            texto = call_openai(prompt, api_key)
-                            asignaciones = json.loads(texto)
-                            df_work["Familia"] = "TRV-99 · Varios / pendiente de clasificar"
-                            for item in asignaciones:
-                                if item["indice"] < len(df_work):
-                                    df_work.at[item["indice"], "Familia"] = item["familia"]
-
-                            # Calcular precio actualizado
-                            año_actual = date.today().year
-                            precios_act = []
-                            tasas_aplicadas = []
-                            for _, row in df_work.iterrows():
-                                col_tasa_val = row.get("Tasa revisión %", None)
-                                if pd.isna(col_tasa_val): col_tasa_val = None
-                                p_act = calcular_precio_actualizado(
-                                    row["Precio unitario"], ref_anio,
-                                    row.get("Familia", ""), col_tasa_val
-                                )
-                                precios_act.append(p_act)
-                                # Registrar tasa efectiva aplicada
-                                if col_tasa_val and col_tasa_val > 0:
-                                    tasas_aplicadas.append(f"{col_tasa_val}% (Excel)")
-                                else:
-                                    disc_f = next((t["disciplina"] for t in TAXONOMIA if t["familia"] == row.get("Familia","")), None)
-                                    td = st.session_state.get("tasas_familia", {}).get(disc_f, 0.0) if disc_f else 0.0
-                                    tef = td if td > 0 else st.session_state.get("tasa_general", 3.0)
-                                    tasas_aplicadas.append(f"{tef}%")
-
-                            df_work["P. unitario original"] = df_work["Precio unitario"]
-                            df_work["Precio unitario"] = precios_act
-                            df_work["Tasa aplicada"] = tasas_aplicadas
-                            df_work["Año original"] = ref_anio
-                            df_work["Año actualizado"] = año_actual
-
-                            # Añadir metadatos
-                            df_work["Obra"] = ref_nombre
-                            df_work["País"] = ref_pais
-                            df_work["Año"] = ref_anio
-                            df_work["Moneda"] = ref_moneda
-                            df_work["Validado"] = False
-
-                            st.session_state["df_ref_preview"] = df_work
-                            st.success(f"✓ {len(df_work)} partidas categorizadas. Revisa y valida.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error IA: {e}")
-
-    # ── Revisión y guardado ───────────────────────────────────────────────────
     if "df_ref_preview" in st.session_state and not st.session_state["df_ref_preview"].empty:
         st.markdown("---")
-        st.markdown("**Revisa la categorización antes de guardar**")
-
-        df_prev_ref = st.session_state["df_ref_preview"]
-        año_actual = date.today().year
-        if "P. unitario original" in df_prev_ref.columns:
-            st.info(f"💡 Precios actualizados de {df_prev_ref['Año original'].iloc[0]} → {año_actual} con tasa compuesta. Columna 'Precio unitario' = precio actualizado.")
-
-        col_config_ref = {
-            "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT),
-            "P. unitario original": st.column_config.NumberColumn("P. original (€)", format="%.2f"),
-            "Precio unitario": st.column_config.NumberColumn(f"P. actualizado {año_actual} (€)", format="%.2f"),
-            "Tasa aplicada": st.column_config.TextColumn("Tasa aplicada"),
-            "Validado": st.column_config.CheckboxColumn("✅ OK"),
-        }
-        if "Importe total" in df_prev_ref.columns:
-            col_config_ref["Importe total"] = st.column_config.NumberColumn("Importe total (€)", format="%.2f")
-
+        st.markdown("**Revisa antes de añadir al historial**")
+        st.caption("'Precio unitario' = precio actualizado al año en curso. 'P. original' = precio del año de referencia.")
         edited_ref = st.data_editor(
-            df_prev_ref,
-            column_config=col_config_ref,
-            use_container_width=True, num_rows="fixed", height=380,
+            st.session_state["df_ref_preview"],
+            column_config={
+                "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT),
+                "P. original": st.column_config.NumberColumn("P. original", format="%.2f"),
+                "Precio unitario": st.column_config.NumberColumn(f"P. actualizado {date.today().year}", format="%.2f"),
+                "Validado": st.column_config.CheckboxColumn("✅ OK"),
+            },
+            use_container_width=True, num_rows="fixed", height=380, key="ed_ref",
         )
         st.session_state["df_ref_preview"] = edited_ref
-
-        if st.button("💾 Añadir al historial de referencias"):
-            nuevas = edited_ref.to_dict("records")
-            st.session_state.referencias.extend(nuevas)
+        if st.button("💾 Añadir al historial"):
+            st.session_state.referencias.extend(edited_ref.to_dict("records"))
             del st.session_state["df_ref_preview"]
-            st.success(f"✓ {len(nuevas)} precios de referencia añadidos al historial.")
+            st.success(f"✓ {len(edited_ref)} precios añadidos al historial.")
             st.rerun()
 
-    # ── Historial de referencias cargadas ─────────────────────────────────────
     if st.session_state.referencias:
         st.markdown("---")
-        df_hist = pd.DataFrame(st.session_state.referencias)
-        obras = df_hist["Obra"].unique().tolist() if "Obra" in df_hist.columns else []
-        st.markdown(f"**Historial: {len(df_hist)} precios de {len(obras)} obra(s)**")
-
-        filtro_obra = st.selectbox("Filtrar por obra", ["Todas"] + obras, key="filtro_obra_ref")
-        filtro_fam = st.selectbox("Filtrar por familia", ["Todas"] + FAMILIAS_DEFAULT, key="filtro_fam_ref")
-
-        df_show = df_hist.copy()
-        if filtro_obra != "Todas": df_show = df_show[df_show["Obra"] == filtro_obra]
-        if filtro_fam != "Todas": df_show = df_show[df_show["Familia"] == filtro_fam]
-
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        if st.button("🗑️ Borrar todo el historial de referencias"):
+        df_hist_r = pd.DataFrame(st.session_state.referencias)
+        obras_r = df_hist_r["Obra"].unique().tolist() if "Obra" in df_hist_r.columns else []
+        st.markdown(f"**Historial: {len(df_hist_r)} precios de {len(obras_r)} obra(s)**")
+        f1, f2 = st.columns(2)
+        fo = f1.selectbox("Obra", ["Todas"]+obras_r, key="fo_r")
+        ff = f2.selectbox("Familia", ["Todas"]+FAMILIAS_DEFAULT, key="ff_r")
+        df_hr = df_hist_r.copy()
+        if fo != "Todas": df_hr = df_hr[df_hr["Obra"]==fo]
+        if ff != "Todas": df_hr = df_hr[df_hr["Familia"]==ff]
+        st.dataframe(df_hr, use_container_width=True, hide_index=True)
+        if st.button("🗑️ Borrar historial de referencias"):
             st.session_state.referencias = []
             st.rerun()
 
@@ -950,219 +860,146 @@ elif paso == "4. Ofertas":
     st.markdown("""
     <div class="step-header">
         <h2>Paso 4 · Ofertas de proveedores</h2>
-        <p>Sube Excel del proveedor. La IA extrae precios, categoriza y detecta qué incluye y qué no.</p>
+        <p>Sube Excel del proveedor. La IA extrae precios, categoriza y detecta alcance de cada precio.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    def leer_excel_generico(archivo):
-        try:
-            if archivo.name.endswith(".csv"):
-                return pd.read_csv(archivo), None
-            df_raw = pd.read_excel(archivo, header=None)
-            header_row = 0
-            for i, row in df_raw.iterrows():
-                if len(row.dropna()) >= 3:
-                    header_row = i
-                    break
-            df = pd.read_excel(archivo, header=header_row)
-            df = df.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
-            return df, None
-        except Exception as e:
-            return None, str(e)
+    if not tiene_api_key():
+        st.markdown("""<div class="info-box-red">⚠️ Necesitas configurar una API key. Ver Paso 2.</div>""", unsafe_allow_html=True)
 
-    def col_letra(i):
-        result, n = "", i + 1
-        while n > 0:
-            n, r = divmod(n - 1, 26)
-            result = chr(65 + r) + result
-        return result
-
-    def parsear_num(valor):
-        try:
-            if isinstance(valor, (int, float)):
-                return float(valor)
-            s = str(valor).strip().replace(" ", "").replace("€", "").replace("$", "")
-            if "," in s and "." in s:
-                s = s.replace(".", "").replace(",", ".")
-            elif "," in s:
-                s = s.replace(",", ".")
-            return float(s)
-        except:
-            return None
-
-    def call_openai(prompt, api_key, max_tokens=4000):
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": "gpt-4o-mini", "temperature": 0.1, "max_tokens": max_tokens,
-                  "messages": [{"role": "user", "content": prompt}]}
-        )
-        data = resp.json()
-        if "error" in data:
-            raise Exception(data["error"]["message"])
-        texto = data["choices"][0]["message"]["content"].strip()
-        if texto.startswith("```"):
-            texto = texto.split("```")[1]
-            if texto.startswith("json"):
-                texto = texto[4:]
-        return texto.strip()
-
-    # ── Metadatos del proveedor ───────────────────────────────────────────────
     st.markdown("**Datos de la oferta**")
     c1, c2, c3, c4, c5 = st.columns(5)
-    of_proveedor = c1.text_input("Proveedor", key="of_proveedor", placeholder="Bortubo, Sancho...")
-    of_fecha     = c2.date_input("Fecha oferta", key="of_fecha")
-    of_validez   = c3.text_input("Validez", key="of_validez", placeholder="30 días, 31/12/25...")
-    of_moneda    = c4.text_input("Moneda", key="of_moneda", value="EUR")
-    of_tipo_gen  = c5.selectbox("Tipo general", ["Subcontrata", "Suministro", "Suministro + montaje", "A confirmar"], key="of_tipo_gen")
+    of_prov   = c1.text_input("Proveedor", key="of_prov", placeholder="Bortubo, Sancho...")
+    of_fecha  = c2.date_input("Fecha", key="of_fecha")
+    of_valid  = c3.text_input("Validez", key="of_valid", placeholder="30 días...")
+    of_moneda = c4.text_input("Moneda", key="of_moneda", value="EUR")
+    of_tipo   = c5.selectbox("Tipo general", ["Subcontrata","Suministro","S+Montaje","A confirmar"], key="of_tipo")
+    of_notas  = st.text_area("Condiciones generales / exclusiones globales", key="of_notas",
+                               placeholder="Ej: precios excluyen medios auxiliares...")
 
-    of_notas_gen = st.text_area("Condiciones generales / exclusiones globales de la oferta", key="of_notas_gen",
-                                 placeholder="Ej: todos los precios excluyen medios auxiliares. Válido para suministro únicamente...")
-
-    archivo_of = st.file_uploader("📂 Subir Excel del proveedor", type=["xlsx", "xls", "csv"], key="up_of")
+    archivo_of = st.file_uploader("📂 Subir Excel del proveedor", type=["xlsx","xls","csv"], key="up_of")
 
     if archivo_of:
-        df_of, err = leer_excel_generico(archivo_of)
-        if err:
-            st.error(f"Error al leer: {err}")
+        hojas_of, err_of = leer_excel_todas_hojas(archivo_of)
+        if err_of:
+            st.error(f"Error: {err_of}")
+        elif not hojas_of:
+            st.error("No se encontraron datos legibles.")
         else:
-            etiquetas = {col: f"{col_letra(i)} · {col}" for i, col in enumerate(df_of.columns)}
-            etiquetas_lista = ["— no incluida —"] + list(etiquetas.values())
-            etiqueta_a_col = {v: k for k, v in etiquetas.items()}
+            hoja_of_sel, df_of_raw = selector_hojas(hojas_of, "oferta")
+            if df_of_raw is not None:
+                st.success(f"✓ Hoja \"{hoja_of_sel}\": {len(df_of_raw)} filas · {len(df_of_raw.columns)} columnas")
+                st.dataframe(df_of_raw.head(6).rename(columns={c: f"{col_letra(i)}·{c}" for i,c in enumerate(df_of_raw.columns)}), use_container_width=True)
 
-            st.success(f"✓ {len(df_of)} filas · {len(df_of.columns)} columnas")
-            df_prev = df_of.head(6).copy()
-            df_prev.columns = [f"{col_letra(i)} · {c}" for i, c in enumerate(df_of.columns)]
-            st.dataframe(df_prev, use_container_width=True)
+                if st.button(f"🤖 Analizar oferta con {nombre_proveedor_ia()}", key="btn_of"):
+                    if not of_prov:
+                        st.error("Indica el nombre del proveedor.")
+                    elif not tiene_api_key():
+                        st.error("Configura una API key.")
+                    else:
+                        with st.spinner("Analizando oferta con IA..."):
+                            try:
+                                sample = df_of_raw.head(30).to_string(index=True, max_colwidth=80)
+                                cols_info = ", ".join([f"{col_letra(i)}: {c}" for i,c in enumerate(df_of_raw.columns)])
+                                prompt_of = f"""Eres experto en presupuestos de infraestructuras hidráulicas.
 
-            st.markdown("**Indica las columnas**")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            s_desc    = c1.selectbox("Descripción ✱", etiquetas_lista, key="os_desc")
-            s_pu      = c2.selectbox("Precio unitario ✱", etiquetas_lista, key="os_pu")
-            s_uni     = c3.selectbox("Unidad", etiquetas_lista, key="os_uni")
-            s_incluye = c4.selectbox("Col. 'qué incluye' (si existe)", etiquetas_lista, key="os_inc")
-            s_notas   = c5.selectbox("Col. notas / comentarios", etiquetas_lista, key="os_not")
+Analiza esta oferta del proveedor "{of_prov}" (tipo: {of_tipo}, moneda: {of_moneda}).
+Condiciones generales: {of_notas or "No especificadas"}
+Columnas: {cols_info}
 
-            if st.button("✅ Cargar y analizar con IA", key="btn_of"):
-                api_key = st.secrets.get("OPENAI_API_KEY", "")
-                if not of_proveedor:
-                    st.error("Indica el nombre del proveedor.")
-                elif s_desc == "— no incluida —" or s_pu == "— no incluida —":
-                    st.error("Descripción y Precio unitario son obligatorios.")
-                elif not api_key:
-                    st.error("⚠️ Falta OPENAI_API_KEY en Secrets.")
-                else:
-                    cols_map = {etiqueta_a_col[s_desc]: "Descripción", etiqueta_a_col[s_pu]: "Precio unitario"}
-                    if s_uni     != "— no incluida —": cols_map[etiqueta_a_col[s_uni]]     = "Unidad"
-                    if s_incluye != "— no incluida —": cols_map[etiqueta_a_col[s_incluye]] = "Incluye_raw"
-                    if s_notas   != "— no incluida —": cols_map[etiqueta_a_col[s_notas]]   = "Notas_raw"
+Primeras filas:
+{sample}
 
-                    df_work = df_of[list(cols_map.keys())].rename(columns=cols_map).copy()
-                    df_work["Precio unitario"] = df_work["Precio unitario"].apply(parsear_num)
-                    df_work = df_work.dropna(subset=["Precio unitario"])
-                    df_work = df_work[df_work["Precio unitario"] > 0].reset_index(drop=True)
+Para cada partida real (no capítulos/totales):
+1. Identifica descripción, precio unitario, unidad
+2. Asigna familia de la taxonomía
+3. Determina qué incluye y qué excluye el precio
+4. Clasifica el tipo de precio
 
-                    PALABRAS_RESUMEN = ["capítulo","capitulo","cap.","total","resumen","suma","subtotal"]
-                    mask = df_work["Descripción"].apply(lambda d: any(str(d).lower().strip().startswith(p) for p in PALABRAS_RESUMEN))
-                    df_work = df_work[~mask].reset_index(drop=True)
-
-                    with st.spinner("Analizando oferta con IA..."):
-                        descs = df_work["Descripción"].fillna("").tolist()
-                        notas_cols = df_work.get("Incluye_raw", pd.Series([""] * len(df_work))).fillna("").tolist()
-
-                        prompt = f"""Eres experto en presupuestos de construcción de infraestructuras hidráulicas.
-Analiza cada partida de esta oferta del proveedor "{of_proveedor}".
-Condiciones generales de la oferta: {of_notas_gen or "No especificadas"}
-
-Para cada partida indica:
-1. "familia": una de la lista (texto exacto)
-2. "incluye": resumen breve de qué cubre el precio (suministro, montaje, medios auxiliares...)
-3. "excluye": qué NO incluye o qué hay que completar
-4. "tipo": "Completa (S+M+MA)", "Solo suministro", "S+M sin MA", "A verificar"
-
-Familias disponibles:
+Familias:
 {TAXONOMIA_TEXTO}
 
-Responde SOLO con JSON sin texto adicional:
-[{{"indice":0,"familia":"...","incluye":"...","excluye":"...","tipo":"..."}}]
+Responde SOLO con JSON:
+{{
+  "columnas": {{"descripcion":"letra","precio_unitario":"letra","unidad":"letra o null"}},
+  "partidas": [
+    {{"fila":0,"familia":"CIV-03 · Movimiento de tierras","descripcion_limpia":"texto",
+      "incluye":"suministro + colocación","excluye":"medios auxiliares",
+      "tipo":"S+M sin MA"}}
+  ]
+}}"""
 
-Partidas (índice: descripción | notas columna si existe):
-""" + "\n".join([f"{i}: {d} | {n}" for i, (d, n) in enumerate(zip(descs, notas_cols))])
+                                resultado = limpiar_json_ia(call_ai(prompt_of, max_tokens=8000))
+                                cols = resultado.get("columnas",{})
+                                partidas_ia = resultado.get("partidas",[])
 
-                        try:
-                            texto = call_openai(prompt, api_key, max_tokens=6000)
-                            asignaciones = json.loads(texto)
+                                col_desc_of = letra_a_col(cols.get("descripcion"), df_of_raw)
+                                col_pu_of   = letra_a_col(cols.get("precio_unitario"), df_of_raw)
+                                col_uni_of  = letra_a_col(cols.get("unidad"), df_of_raw)
 
-                            df_work["Familia"] = "TRV-99 · Varios / pendiente de clasificar"
-                            df_work["Incluye"] = ""
-                            df_work["Excluye"] = ""
-                            df_work["Tipo"] = "A verificar"
+                                filas_of = {p["fila"]: p for p in partidas_ia}
+                                registros_of = []
+                                for idx, p_ia in filas_of.items():
+                                    if 0 <= idx < len(df_of_raw):
+                                        row = df_of_raw.iloc[idx]
+                                        pu = parsear_num(row[col_pu_of]) if col_pu_of else None
+                                        if not pu or pu <= 0:
+                                            continue
+                                        registros_of.append({
+                                            "Descripción": p_ia.get("descripcion_limpia") or (str(row[col_desc_of]).strip() if col_desc_of else ""),
+                                            "Familia": p_ia.get("familia","TRV-99 · Varios / pendiente de clasificar"),
+                                            "Precio unitario": pu,
+                                            "Unidad": str(row[col_uni_of]).strip() if col_uni_of else "",
+                                            "Incluye": p_ia.get("incluye",""),
+                                            "Excluye": p_ia.get("excluye",""),
+                                            "Tipo": p_ia.get("tipo","A verificar"),
+                                            "Proveedor": of_prov, "Fecha": str(of_fecha),
+                                            "Validez": of_valid, "Moneda": of_moneda,
+                                            "Validado": False,
+                                        })
 
-                            for item in asignaciones:
-                                idx = item.get("indice", -1)
-                                if 0 <= idx < len(df_work):
-                                    df_work.at[idx, "Familia"]  = item.get("familia", "TRV-99 · Varios / pendiente de clasificar")
-                                    df_work.at[idx, "Incluye"]  = item.get("incluye", "")
-                                    df_work.at[idx, "Excluye"]  = item.get("excluye", "")
-                                    df_work.at[idx, "Tipo"]     = item.get("tipo", "A verificar")
+                                df_of_work = pd.DataFrame(registros_of)
+                                st.session_state["df_of_preview"] = df_of_work
+                                st.success(f"✓ {len(df_of_work)} partidas analizadas. Revisa antes de guardar.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error IA: {e}")
 
-                            df_work["Proveedor"] = of_proveedor
-                            df_work["Fecha"]     = str(of_fecha)
-                            df_work["Validez"]   = of_validez
-                            df_work["Moneda"]    = of_moneda
-                            df_work["Validado"]  = False
-
-                            st.session_state["df_of_preview"] = df_work
-                            st.success(f"✓ {len(df_work)} partidas analizadas. Revisa antes de guardar.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error IA: {e}")
-
-    # ── Revisión y guardado ───────────────────────────────────────────────────
     if "df_of_preview" in st.session_state and not st.session_state["df_of_preview"].empty:
         st.markdown("---")
         st.markdown("**Revisa la oferta antes de guardar**")
-        st.caption("Corrige familia, incluye/excluye si la IA se equivocó. Marca ✅ las que hayas validado.")
-
         edited_of = st.data_editor(
             st.session_state["df_of_preview"],
             column_config={
-                "Familia":  st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT),
-                "Tipo":     st.column_config.SelectboxColumn("Tipo", options=["Completa (S+M+MA)", "Solo suministro", "S+M sin MA", "A verificar"]),
+                "Familia": st.column_config.SelectboxColumn("Familia", options=FAMILIAS_DEFAULT),
+                "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Completa (S+M+MA)","Solo suministro","S+M sin MA","A verificar"]),
                 "Precio unitario": st.column_config.NumberColumn("P. Unitario", format="%.2f"),
                 "Validado": st.column_config.CheckboxColumn("✅ OK"),
             },
-            use_container_width=True, num_rows="fixed", height=400,
+            use_container_width=True, num_rows="fixed", height=400, key="ed_of",
         )
         st.session_state["df_of_preview"] = edited_of
-
         if st.button("💾 Añadir al historial de ofertas"):
-            nuevas = edited_of.to_dict("records")
-            st.session_state.ofertas.extend(nuevas)
+            st.session_state.ofertas.extend(edited_of.to_dict("records"))
             del st.session_state["df_of_preview"]
-            st.success(f"✓ {len(nuevas)} precios de oferta añadidos.")
+            st.success(f"✓ {len(edited_of)} precios añadidos.")
             st.rerun()
 
-    # ── Historial de ofertas ───────────────────────────────────────────────────
     if st.session_state.ofertas:
         st.markdown("---")
         df_hist_of = pd.DataFrame(st.session_state.ofertas)
-        proveedores = df_hist_of["Proveedor"].unique().tolist() if "Proveedor" in df_hist_of.columns else []
-        st.markdown(f"**Historial: {len(df_hist_of)} precios de {len(proveedores)} proveedor(es)**")
-
-        filtro_prov = st.selectbox("Filtrar por proveedor", ["Todos"] + proveedores, key="filtro_prov")
-        filtro_fam2 = st.selectbox("Filtrar por familia", ["Todas"] + FAMILIAS_DEFAULT, key="filtro_fam_of")
-
-        df_show_of = df_hist_of.copy()
-        if filtro_prov != "Todos": df_show_of = df_show_of[df_show_of["Proveedor"] == filtro_prov]
-        if filtro_fam2 != "Todas": df_show_of = df_show_of[df_show_of["Familia"] == filtro_fam2]
-
-        st.dataframe(df_show_of, use_container_width=True, hide_index=True)
-
-        if st.button("🗑️ Borrar todo el historial de ofertas"):
+        provs = df_hist_of["Proveedor"].unique().tolist() if "Proveedor" in df_hist_of.columns else []
+        st.markdown(f"**Historial: {len(df_hist_of)} precios de {len(provs)} proveedor(es)**")
+        f1, f2 = st.columns(2)
+        fp = f1.selectbox("Proveedor", ["Todos"]+provs, key="fp_of")
+        ff2 = f2.selectbox("Familia", ["Todas"]+FAMILIAS_DEFAULT, key="ff_of")
+        df_ho = df_hist_of.copy()
+        if fp != "Todos": df_ho = df_ho[df_ho["Proveedor"]==fp]
+        if ff2 != "Todas": df_ho = df_ho[df_ho["Familia"]==ff2]
+        st.dataframe(df_ho, use_container_width=True, hide_index=True)
+        if st.button("🗑️ Borrar historial de ofertas"):
             st.session_state.ofertas = []
             st.rerun()
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PASO 5 — ANÁLISIS
