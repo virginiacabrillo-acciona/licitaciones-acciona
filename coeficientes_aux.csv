@@ -1,0 +1,10 @@
+id_coef,tipo_obra,descripcion,coef_medios_auxiliares,coef_seguros,comentario
+C001,EDAR,Planta depuradora en zona accesible,0.04,0.015,Medios normales sin restricciones de espacio
+C002,EDAR,Planta depuradora en zona urbana o confinada,0.055,0.015,Mayor coste por restricciones logísticas
+C003,IDAM,Desaladora en zona costera,0.045,0.015,Medios estándar más protección corrosión ambiental
+C004,IDAM,Desaladora en zona remota o insular,0.065,0.020,Logística especial por acceso limitado
+C005,ETAP,Potabilizadora en zona rural accesible,0.035,0.012,Condiciones favorables de acceso
+C006,Colectores,Obra lineal en vial urbano,0.060,0.015,Señalización tráfico y medios especiales
+C007,Colectores,Obra lineal en zona rural,0.040,0.012,Menos restricciones de circulación
+C008,Obra_maritima,Trabajo en zona marítima o intertidal,0.080,0.025,Equipos especiales y protecciones adicionales
+C009,General,Estimación general sin datos específicos,0.050,0.015,Valor conservador cuando no se dispone de dato específico
