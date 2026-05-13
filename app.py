@@ -51,7 +51,8 @@ def cargar_ingestor():
 def init():
     defs = {"paso":"1. Cargar","proyecto":{},"archivo_bytes":None,
             "archivo_nombre":"","hojas_info":{},"partidas_master":pd.DataFrame(),
-            "log_ingesta":[],"resumen_ingesta":{}}
+            "log_ingesta":[],"resumen_ingesta":{},
+            "fuentes_precio":None}
     for k,v in defs.items():
         if k not in st.session_state: st.session_state[k]=v
 init()
@@ -257,6 +258,70 @@ elif paso == "2. Hojas":
     cc3.metric("→ Referencias", len(refs))
     if ppto: st.markdown(f"**Hojas como presupuesto:** {', '.join(ppto)}")
 
+    # ── Cargar fuentes de precio (ofertas / referencias) ──────────────────────
+    hojas_fp = [(h,hi) for h,hi in hi_all.items()
+                if hi.get("tipo_usuario") in ("Oferta proveedor","Referencia histórica")]
+    if hojas_fp:
+        st.markdown("---")
+        st.markdown("**Cargar fuentes de precio**")
+        st.caption("Las hojas marcadas como Oferta o Referencia se procesan como fuentes de precio, no como partidas_master.")
+
+        try:
+            from fuentes_precio import GestorFuentes
+            fp_ok = True
+        except Exception:
+            fp_ok = False
+            st.error("fuentes_precio.py no encontrado.")
+
+        if fp_ok:
+            with st.form("form_fp"):
+                params_fp = {}
+                for hoja, hi in hojas_fp:
+                    st.markdown(f"**{hoja}** — {hi.get('tipo_usuario')}")
+                    cf1,cf2,cf3,cf4 = st.columns(4)
+                    params_fp[hoja] = {
+                        "proveedor": cf1.text_input("Proveedor / Obra ref.",
+                                                      key=f"fp_prov_{hoja}",
+                                                      placeholder="CEMEX / EDAR Almería 2021"),
+                        "fecha_ref": cf2.text_input("Fecha (YYYY-MM)",
+                                                      key=f"fp_fecha_{hoja}",
+                                                      placeholder="2023-06"),
+                        "moneda":    cf3.selectbox("Moneda",
+                                                    ["EUR","USD","MAD","SAR","GBP"],
+                                                    key=f"fp_mon_{hoja}"),
+                        "tasa_act":  cf4.number_input("Factor actualiz.",
+                                                        value=1.00, min_value=0.50,
+                                                        max_value=2.00, step=0.01,
+                                                        key=f"fp_tasa_{hoja}",
+                                                        help="1.0 = sin actualizar · 1.05 = +5%"),
+                    }
+                if st.form_submit_button("📥 Cargar fuentes de precio"):
+                    hojas_raw2 = ing.leer_todas_hojas(st.session_state.archivo_bytes,
+                                                       st.session_state.archivo_nombre)
+                    gestor = GestorFuentes()
+                    total_cargadas = 0
+                    for hoja, hi in hojas_fp:
+                        p = params_fp.get(hoja, {})
+                        if not p.get("proveedor"):
+                            st.warning(f"Sin nombre de proveedor para {hoja}. Saltado.")
+                            continue
+                        tipo_fp = ("oferta_proveedor" if hi["tipo_usuario"] == "Oferta proveedor"
+                                   else "referencia_historica")
+                        n, warns = gestor.cargar_desde_hoja(
+                            hojas_raw2[hoja], hoja, tipo=tipo_fp,
+                            proveedor_origen=p["proveedor"],
+                            nombre_archivo=st.session_state.archivo_nombre,
+                            fecha_referencia=p.get("fecha_ref"),
+                            moneda=p.get("moneda","EUR"),
+                            tasa_actualizacion=float(p.get("tasa_act",1.0)),
+                        )
+                        total_cargadas += n
+                        for w in warns: st.warning(w)
+                    # Clasificar fuentes automáticamente
+                    n_clas = gestor.clasificar_fuentes()
+                    st.session_state.fuentes_precio = gestor
+                    st.success(f"✓ {total_cargadas} precios cargados · {n_clas} clasificados automáticamente")
+
     if ppto:
         with st.expander(f"🔍 Vista previa — {ppto[0]}", expanded=False):
             try:
@@ -359,8 +424,8 @@ elif paso == "4. Revisar":
     c4.metric("Sin clasificar", str(sin_clas))
     c5.metric("Descuadres", len(ing.audit_descuadres(pm)))
 
-    t_fam, t_par, t_sin, t_tbl, t_dsc = st.tabs(
-        ["📊 Familias","🎯 Pareto","❓ Sin clasificar","📋 Tabla completa","⚠️ Descuadres"])
+    t_fam, t_par, t_sin, t_tbl, t_dsc, t_apu, t_fp = st.tabs(
+        ["📊 Familias","🎯 Pareto","❓ Sin clasificar","📋 Tabla completa","⚠️ Descuadres","🧮 APU","💰 Fuentes"])
 
     with t_fam:
         rf = ing.resumen_familias(pm)
@@ -480,6 +545,143 @@ elif paso == "4. Revisar":
             st.markdown('<div class="box-ok">✅ Sin descuadres significativos.</div>',
                         unsafe_allow_html=True)
 
+    with t_apu:
+        st.markdown("**Composición de precios unitarios — APU**")
+        st.caption("Calcula el precio colocado desde componentes: suministro + mano de obra + bombeo + medios auxiliares.")
+
+        try:
+            from apu_utils import MotorAPU, sugerir_rendimiento_ia
+            apu_ok = True
+        except Exception as e:
+            st.error(f"apu_utils.py no disponible: {e}")
+            apu_ok = False
+
+        if apu_ok:
+            motor = MotorAPU()
+            n_h = int((pm.get("codigo_familia_auto","") == "CIV-07").sum())
+            st.markdown(f"**{n_h} partidas de hormigón** (CIV-07) en el master.")
+
+            ca1,ca2,ca3 = st.columns(3)
+            pais_a = ca1.selectbox("País",
+                ["España","Marruecos","Arabia Saudí","Chile","Australia","Portugal","Francia","Otro"],
+                key="pais_apu")
+            zona_a = ca2.text_input("Zona (opcional)", key="zona_apu",
+                                     placeholder="Islas Baleares, Neom...")
+            obra_a = ca3.selectbox("Tipo de obra",
+                ["EDAR","IDAM","ETAP","Colectores","Obra_maritima","General"],
+                key="obra_apu")
+            zona_v = zona_a.strip() or None
+
+            tarifa_t = motor.buscar_tarifa(pais_a, zona_v)
+            if tarifa_t:
+                st.caption(f"Tarifa: oficial 1ª = {tarifa_t.get('oficial_1a_hora')} {tarifa_t.get('moneda')}/h · peón = {tarifa_t.get('peon_hora')} {tarifa_t.get('moneda')}/h")
+            else:
+                st.markdown('<div class="box-warn">⚠️ Sin tarifa para ese país/zona. Añade fila en <code>tarifas_personal.csv</code>.</div>',
+                             unsafe_allow_html=True)
+
+            if st.button("🧮 Calcular APUs de hormigón", key="btn_apu"):
+                with st.spinner("Calculando..."):
+                    pm_upd = motor.componer_lote(pm, pais=pais_a, zona=zona_v, tipo_obra=obra_a)
+                    st.session_state.partidas_master = pm_upd
+                resumen_a = motor.resumen_apu(pm_upd)
+                if not resumen_a.empty:
+                    completos = int((resumen_a.get("apu_completitud","") == "completo").sum())
+                    st.metric("APUs completos", f"{completos}/{len(resumen_a)}")
+                    st.dataframe(resumen_a, use_container_width=True, hide_index=True)
+                    if completos < len(resumen_a):
+                        st.markdown('<div class="box-warn">⚠️ APUs incompletas: falta precio de suministro. Introdúcelo en Tabla completa o en fuentes_precio (MVP 2).</div>',
+                                     unsafe_allow_html=True)
+
+            with st.expander("📋 Tarifas de mano de obra", expanded=False):
+                if not motor.tarifas.empty:
+                    st.dataframe(motor.tarifas, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("tarifas_personal.csv no encontrado.")
+
+            with st.expander("📋 Rendimientos por tipo de elemento", expanded=False):
+                if not motor.rendimientos.empty:
+                    st.dataframe(motor.rendimientos, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("rendimientos.csv no encontrado.")
+
+    with t_fp:
+        st.markdown("**Fuentes de precio cargadas**")
+        st.caption("Ofertas de proveedores y referencias históricas vinculadas a las familias del master.")
+
+        gestor = st.session_state.get("fuentes_precio")
+
+        if gestor is None or gestor.fuentes.empty:
+            st.markdown('''<div class="box-warn">
+            ⚠️ No hay fuentes de precio cargadas.<br>
+            Ve al <strong>Paso 2</strong>, marca hojas como "Oferta proveedor" o "Referencia histórica"
+            y usa el formulario de carga de fuentes.
+            </div>''', unsafe_allow_html=True)
+
+            # Entrada manual
+            st.markdown("---")
+            st.markdown("**O añade un precio manualmente:**")
+            try:
+                from fuentes_precio import GestorFuentes
+                with st.form("form_fp_manual"):
+                    fm1,fm2,fm3 = st.columns(3)
+                    tipo_m  = fm1.selectbox("Tipo",["oferta_proveedor","referencia_historica","tarifa_oficial"],key="fp_m_tipo")
+                    prov_m  = fm2.text_input("Proveedor / Origen",key="fp_m_prov")
+                    desc_m  = st.text_input("Descripción del artículo",key="fp_m_desc",
+                                             placeholder="Hormigón HA-35 suministrado en obra")
+                    fn1,fn2,fn3,fn4 = st.columns(4)
+                    uni_m   = fn1.text_input("Unidad",key="fp_m_uni",placeholder="m³")
+                    precio_m= fn2.number_input("Precio",min_value=0.0,step=0.01,key="fp_m_precio")
+                    mon_m   = fn3.selectbox("Moneda",["EUR","USD","MAD","SAR"],key="fp_m_mon")
+                    fam_m   = fn4.text_input("Familia (opcional)",key="fp_m_fam",placeholder="CIV-07")
+                    if st.form_submit_button("➕ Añadir fuente"):
+                        if not prov_m or not desc_m or precio_m <= 0:
+                            st.error("Proveedor, descripción y precio son obligatorios.")
+                        else:
+                            if gestor is None:
+                                gestor = GestorFuentes()
+                                st.session_state.fuentes_precio = gestor
+                            id_f = gestor.añadir_manual(tipo_m, prov_m, desc_m, uni_m,
+                                                         precio_m, mon_m,
+                                                         codigo_familia=fam_m or None)
+                            st.success(f"✓ Fuente {id_f} añadida.")
+            except Exception as e:
+                st.error(f"fuentes_precio.py no disponible: {e}")
+        else:
+            # Mostrar resumen
+            rf = gestor.resumen_por_familia()
+            if not rf.empty:
+                st.dataframe(rf, use_container_width=True, hide_index=True)
+
+            # Vincular a master si hay partidas
+            if not pm.empty and st.button("🔗 Vincular fuentes a partidas_master", key="btn_vincular"):
+                vinc = gestor.vincular_a_master(pm)
+                if not vinc.empty:
+                    n_vin = vinc["id_partida"].nunique()
+                    st.success(f"✓ {len(vinc)} vinculaciones para {n_vin} partidas.")
+                    st.dataframe(vinc, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No se encontraron vinculaciones. Verifica que las fuentes estén clasificadas.")
+
+            # Tabla completa de fuentes
+            with st.expander("📋 Tabla completa de fuentes", expanded=False):
+                st.dataframe(gestor.fuentes, use_container_width=True, hide_index=True)
+
+            # Estadísticas por familia
+            with st.expander("📊 Estadísticas por familia", expanded=False):
+                familias_con_fuentes = gestor.fuentes["codigo_familia"].dropna().unique().tolist()
+                if familias_con_fuentes:
+                    fam_sel = st.selectbox("Familia", familias_con_fuentes, key="fp_fam_stat")
+                    stats = gestor.precios_para_apu(fam_sel)
+                    if stats:
+                        sc1,sc2,sc3,sc4 = st.columns(4)
+                        sc1.metric("N fuentes", stats["n_fuentes"])
+                        sc2.metric("Mínimo", f"{stats['precio_min']:.2f} €")
+                        sc3.metric("Mediana", f"{stats['precio_mediana']:.2f} €")
+                        sc4.metric("Máximo", f"{stats['precio_max']:.2f} €")
+                        if stats.get("coef_variacion"):
+                            st.caption(f"Coef. variación: {stats['coef_variacion']}% — {'dispersión alta, revisar' if stats['coef_variacion'] > 20 else 'dispersión aceptable'}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # P5 — EXPORTAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -539,3 +741,4 @@ elif paso == "5. Exportar":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.markdown(f'<div class="box-ok">✅ Excel generado: {" · ".join(hojas_exp)}</div>',
                     unsafe_allow_html=True)
+
