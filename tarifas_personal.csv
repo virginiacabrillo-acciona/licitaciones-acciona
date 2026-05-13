@@ -1,0 +1,11 @@
+id_tarifa,pais,zona,fecha_referencia,moneda,oficial_1a_hora,oficial_2a_hora,peon_hora,encargado_hora,tecnico_hora,comentario
+T001,España,General,2024-01,EUR,21.50,19.00,16.50,26.00,32.00,Convenio construcción 2024 general
+T002,España,Islas Baleares,2024-01,EUR,22.80,20.10,17.40,27.50,33.50,Convenio Baleares 2024 con insularidad
+T003,Marruecos,General,2024-01,EUR,4.50,3.80,3.20,6.00,9.00,Estimación mercado local en euros
+T004,Marruecos,Rabat-Casablanca,2024-01,EUR,5.00,4.20,3.50,6.50,10.00,Zona costera norte mayor coste MO
+T005,Arabia Saudí,General,2024-01,EUR,6.00,5.00,3.80,8.00,12.00,Estimación incluyendo coste alojamiento
+T006,Arabia Saudí,Neom-Yidda,2024-01,EUR,7.50,6.00,4.50,10.00,15.00,Zona de alta demanda y coste adicional
+T007,Australia,General,2024-01,EUR,38.00,32.00,28.00,46.00,60.00,Estimación AUD a EUR tipo cambio 2024
+T008,Chile,General,2024-01,EUR,8.50,7.00,5.50,11.00,16.00,Estimación CLP a EUR tipo cambio 2024
+T009,Francia,General,2024-01,EUR,28.00,24.00,20.00,34.00,45.00,Convention BTP France 2024
+T010,Portugal,General,2024-01,EUR,16.00,14.00,12.00,20.00,26.00,Acordo coletivo construção Portugal 2024
